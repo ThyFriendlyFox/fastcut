@@ -5,6 +5,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · Versioning: [SemVer](
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-02
+### Added
+- Drag motion graphics, the caption and the words on screen to move them. Drag a corner to resize them.
+- Drag a box in Layouts to move it. Drag a corner to resize it. "Reset boxes" puts the template back.
+- Yellow center lines show when an element snaps to the middle.
+- "Save as my template" keeps the boxes, motion graphics, caption, background and size. In Fast edits it keeps the style setup.
+- My templates are saved in this browser. "Export file" and "Import file" move them to another computer.
+### Changed
+- "Fit (no crop)" fills the empty space with a blurred copy of the clip instead of black.
+### Removed
+- Dragging one filled box onto another no longer swaps them. Dragging a box now moves it.
+
 ## [0.4.0] - 2026-11-02
 ### Added
 - Size menu next to Export: Auto, Wide 16:9, Tall 9:16, Square 1:1, Portrait 4:5 and Custom size.

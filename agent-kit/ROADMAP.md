@@ -48,6 +48,7 @@ provisional: true — the agent seeded this order at install time. The human re-
 
 | Week | Feature | Release | Evidence |
 |---|---|---|---|
+| 2026-11-02 | Drag, resize and save my templates | 0.5.0 | Playwright: box 0 moved to x 0.135; sticker scale 1.6; saved template restored after reload; `src/elements.test.ts` |
 | 2026-11-02 | Video size menu (shape, quality, custom) | 0.4.0 | Custom 1000×1000 export decodes at 1000×1000; `outputSize` unit tests |
 | 2026-11-02 | Audio bar (song section, volumes, fades, ducking) | 0.3.0 | Song plays from 17.5 s at video 1.5 s with the window at 16 s (Playwright) |
 | 2026-11-02 | Fast edits, motion graphics, MP3 songs | 0.2.0 | 120 BPM detected on a 120 BPM track; MP4 export with overlays (Playwright) |
@@ -61,3 +62,4 @@ provisional: true — the agent seeded this order at install time. The human re-
 ## Queue changes
 
 - 2026-11-02 — Seeded the queue at kit install. Order is provisional until the human ranks it.
+- 2026-11-02 — Inserted "Drag, resize and save my templates" above position 1. The owner asked for it directly. It shipped the same day as 0.5.0.

@@ -41,6 +41,18 @@ Evidence: <commit / tag / gate run / screenshot>
 
 <!-- Entries below, newest first. -->
 
+## 2026-11-02 — Added drag, resize and my templates
+
+The owner asked to grab elements on the video, drag them and resize them.
+Then the owner asked to save the result as a template.
+I added a move-and-resize layer over the video for boxes, motion graphics, the caption and the words on screen.
+Each element keeps its default spot plus an offset and a scale, so old projects still draw the same.
+Dragging a box now moves it. That replaced box swapping, which used the same gesture.
+Saved templates live in the browser's local storage. A file export moves them between computers.
+I also changed "Fit" to fill the empty space with a blurred copy of the clip, as in the owner's screenshot.
+
+Evidence: Playwright drag test; `npm run verify` green with 17 tests
+
 ## 2026-11-02 — Installed the agent kit
 
 I installed the agent kit in `agent-kit/` and filled every placeholder.

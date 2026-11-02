@@ -1,6 +1,6 @@
 # Architecture
 
-FastCut is a single-page web app (React + TypeScript, built with Vite) that edits and exports video entirely in the browser. The code has 8 parts.
+FastCut is a single-page web app (React + TypeScript, built with Vite) that edits and exports video entirely in the browser. The code has 10 parts.
 
 | Part | Folder | Task |
 |---|---|---|
@@ -12,6 +12,8 @@ FastCut is a single-page web app (React + TypeScript, built with Vite) that edit
 | Motion graphics | `src/overlays.ts` | Presets and drawing for animated overlays. |
 | Beat finder | `src/beats.ts` | Song waveform, tempo and beat times. |
 | Auto-captions | `src/captions.ts` | Word timestamps from speech with Whisper tiny (transformers.js). |
+| Elements | `src/elements.ts` | Move/resize math: offsets, scale, center snapping. |
+| My templates | `src/userTemplates.ts` | Saved templates in local storage. |
 
 ## Data flow
 

@@ -6,6 +6,9 @@ import { FONTS } from './montageDraw'
 import { SongInfo, detectBeats } from './beats'
 import { transcribe } from './captions'
 import { OVERLAY_COLORS, Overlay, PRESETS, Preset, drawOverlay } from './overlays'
+import { Box, NO_XFORM, Xform, boxToXform, snapCenter, xformBox } from './elements'
+import { UserTemplate, loadUserTemplates, saveUserTemplates } from './userTemplates'
+import type { Rect } from './templates'
 import { AnimatePresence, motion } from 'motion/react'
 
 const spring = { type: 'spring', stiffness: 500, damping: 34 } as const
@@ -184,6 +187,7 @@ type EditSettings = {
   handle: string
   filter: FilterKind | null
   onBeat: boolean
+  textXform?: Xform
 }
 
 const SHAPES: [Shape, string, string][] = [
@@ -295,6 +299,9 @@ export default function App() {
     imageSeconds: 5,
   }))
   const [selected, setSelected] = useState<number | null>(null)
+  const [els, setEls] = useState<{ key: string; label: string; base: Box }[]>([])
+  const [pick, setPick] = useState<string | null>(null)
+  const [userTemplates, setUserTemplates] = useState<UserTemplate[]>(() => loadUserTemplates())
   const [rightTab, setRightTab] = useState<'edit' | 'motion'>('edit')
   const [openOverlay, setOpenOverlay] = useState<string | null>(null)
   const [armed, setArmed] = useState<string | null>(null)
@@ -362,7 +369,7 @@ export default function App() {
       beats: songBeats,
       handle: edit.handle,
     })
-    return { timeline, style, filter: edit.filter ?? style.filter, handle: edit.handle }
+    return { timeline, style, filter: edit.filter ?? style.filter, handle: edit.handle, textXform: edit.textXform }
   }, [clips, edit, style, beats, project.musicId, project.musicStart])
 
   // engine lifecycle
@@ -372,8 +379,19 @@ export default function App() {
     ;(window as unknown as { fastcut: Engine }).fastcut = e // handy for debugging
     e.setProject(project)
     let last = 0
+    let lastEls = 0
+    let elsKey = ''
     e.onTick = (t, total, playing) => {
       const now = performance.now()
+      if (now - lastEls > 100) {
+        lastEls = now
+        const list = e.elementBoxes().map(({ key, label, base }) => ({ key, label, base }))
+        const k = JSON.stringify(list)
+        if (k !== elsKey) {
+          elsKey = k
+          setEls(list)
+        }
+      }
       if (now - last > 100 || !playing) {
         last = now
         setTime((p) => (p.t === t && p.total === total && p.playing === playing ? p : { t, total, playing }))
@@ -388,6 +406,171 @@ export default function App() {
   }, [project, montage, fontsReady])
 
   const isMontage = project.mode === 'montage'
+
+  // ---------- grab, move and resize on the video ----------
+  const stageRef = useRef<HTMLDivElement>(null)
+  const justDragged = useRef(false)
+  const [guides, setGuides] = useState<{ vx: boolean; hy: boolean } | null>(null)
+
+  const xformOf = (key: string): Xform => {
+    if (key === 'words') return edit.textXform ?? NO_XFORM
+    if (key === 'caption') return project.caption.xform ?? NO_XFORM
+    return project.overlays.find((o) => 'o:' + o.id === key)?.xform ?? NO_XFORM
+  }
+  const setXform = (key: string, x: Xform | undefined) => {
+    if (key === 'words') patchEdit({ textXform: x })
+    else if (key === 'caption') update((p) => ({ ...p, caption: { ...p.caption, xform: x } }))
+    else patchOverlay(key.slice(2), { xform: x })
+  }
+  const setRegion = (i: number, r: Rect) =>
+    update((p) => ({ ...p, template: { ...p.template, regions: p.template.regions.map((x, k) => (k === i ? r : x)) } }))
+  const baseTemplate = [...TEMPLATES, ...userTemplates.filter((u) => u.template).map((u) => u.template!)].find(
+    (t) => t.id === project.template.id,
+  )
+  const boxesEdited = !!baseTemplate && JSON.stringify(baseTemplate.regions) !== JSON.stringify(project.template.regions)
+
+  type Handle = 'move' | 'nw' | 'ne' | 'sw' | 'se'
+  /** Pointer drag on the video. `uniform` keeps the shape and scales around the center. */
+  const beginDrag = (e: React.PointerEvent, start: Box, mode: Handle, uniform: boolean, apply: (b: Box) => void, onTap?: () => void) => {
+    if (e.button !== 0) return
+    e.stopPropagation()
+    e.preventDefault()
+    const rect = stageRef.current!.getBoundingClientRect()
+    const nx = (x: number) => (x - rect.left) / rect.width
+    const ny = (y: number) => (y - rect.top) / rect.height
+    const x0 = e.clientX
+    const y0 = e.clientY
+    const d0 = Math.hypot(nx(x0) - start.cx, ny(y0) - start.cy) || 0.01
+    let moved = false
+    const onMove = (ev: PointerEvent) => {
+      if (!moved && Math.hypot(ev.clientX - x0, ev.clientY - y0) < 4) return
+      moved = true
+      const dx = nx(ev.clientX) - nx(x0)
+      const dy = ny(ev.clientY) - ny(y0)
+      let nb: Box
+      if (mode === 'move') {
+        const sn = snapCenter({ ...start, cx: start.cx + dx, cy: start.cy + dy })
+        setGuides({ vx: sn.vx, hy: sn.hy })
+        nb = sn.box
+      } else if (uniform) {
+        const f = Math.max(0.15, Math.hypot(nx(ev.clientX) - start.cx, ny(ev.clientY) - start.cy) / d0)
+        nb = { ...start, w: start.w * f, h: start.h * f }
+      } else {
+        let l = start.cx - start.w / 2
+        let r = start.cx + start.w / 2
+        let t = start.cy - start.h / 2
+        let b = start.cy + start.h / 2
+        const px = nx(ev.clientX)
+        const py = ny(ev.clientY)
+        if (mode === 'nw' || mode === 'sw') l = Math.min(px, r - 0.04)
+        else r = Math.max(px, l + 0.04)
+        if (mode === 'nw' || mode === 'ne') t = Math.min(py, b - 0.04)
+        else b = Math.max(py, t + 0.04)
+        nb = { cx: (l + r) / 2, cy: (t + b) / 2, w: r - l, h: b - t }
+      }
+      apply(nb)
+    }
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      setGuides(null)
+      if (moved) {
+        justDragged.current = true
+        setTimeout(() => (justDragged.current = false), 0)
+      } else onTap?.()
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }
+  const rectToBox = (r: Rect): Box => ({ cx: r.x + r.w / 2, cy: r.y + r.h / 2, w: r.w, h: r.h })
+  const boxToRect = (b: Box): Rect => ({ x: b.cx - b.w / 2, y: b.cy - b.h / 2, w: b.w, h: b.h })
+  const handles = (onDown: (e: React.PointerEvent, h: Handle) => void) =>
+    (['nw', 'ne', 'sw', 'se'] as const).map((h) => <span key={h} className={'handle ' + h} onPointerDown={(e) => onDown(e, h)} />)
+
+  // ---------- my templates ----------
+  const [savingName, setSavingName] = useState<string | null>(null)
+  const saveTemplate = (name: string) => {
+    const id = uid()
+    const base = {
+      id,
+      name: name.trim() || 'My template',
+      createdAt: new Date().toISOString(),
+      format: project.format,
+      overlays: project.overlays,
+    }
+    const t: UserTemplate = isMontage
+      ? {
+          ...base,
+          kind: 'montage',
+          edit: {
+            styleId: edit.styleId,
+            voiceMode: edit.voiceMode,
+            speed: edit.speed,
+            length: edit.length,
+            handle: edit.handle,
+            filter: edit.filter,
+            onBeat: edit.onBeat,
+            textXform: edit.textXform,
+          },
+        }
+      : {
+          ...base,
+          kind: 'layout',
+          template: { ...project.template, id: 'user-' + id, name: name.trim() || 'My template' },
+          background: project.background,
+          radius: project.radius,
+          caption: project.caption,
+        }
+    const next = [t, ...userTemplates]
+    setUserTemplates(next)
+    saveUserTemplates(next)
+    setSavingName(null)
+  }
+  const applyTemplate = (t: UserTemplate) => {
+    const overlays = t.overlays.map((o) => ({ ...o, id: uid() }))
+    if (t.kind === 'layout' && t.template) {
+      chooseTemplate(t.template)
+      update((p) => ({
+        ...p,
+        mode: 'layout',
+        background: t.background ?? p.background,
+        radius: t.radius ?? p.radius,
+        caption: t.caption ?? p.caption,
+        overlays,
+        format: t.format,
+      }))
+    } else {
+      update((p) => ({ ...p, mode: 'montage', overlays, format: t.format }))
+      patchEdit({ ...t.edit })
+    }
+  }
+  const deleteTemplate = (id: string) => {
+    const next = userTemplates.filter((t) => t.id !== id)
+    setUserTemplates(next)
+    saveUserTemplates(next)
+  }
+  const exportTemplates = () => {
+    const blob = new Blob([JSON.stringify({ fastcutTemplates: 1, templates: userTemplates }, null, 2)], { type: 'application/json' })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = 'fastcut-templates.json'
+    a.click()
+  }
+  const importRef = useRef<HTMLInputElement>(null)
+  const importTemplates = async (f: File) => {
+    try {
+      const data = JSON.parse(await f.text())
+      const list: UserTemplate[] = (data.templates ?? []).filter(
+        (t: UserTemplate) => t && t.id && t.name && (t.kind === 'layout' || t.kind === 'montage'),
+      )
+      const known = new Set(userTemplates.map((t) => t.id))
+      const next = [...list.filter((t) => !known.has(t.id)), ...userTemplates]
+      setUserTemplates(next)
+      saveUserTemplates(next)
+    } catch {
+      alert('That file is not a FastCut templates file.')
+    }
+  }
   const autoAspect: Aspect = isMontage ? style.aspect : project.template.aspect
   const out = outputSize(project.format, autoAspect)
   const [sizeOpen, setSizeOpen] = useState(false)
@@ -697,6 +880,86 @@ export default function App() {
             </button>
           ))}
         </div>
+        <div className="mine">
+          {savingName === null ? (
+            <button className="btn full save-tpl" onClick={() => setSavingName(`My template ${userTemplates.length + 1}`)}>
+              ⭐ Save as my template
+            </button>
+          ) : (
+            <form
+              className="save-form"
+              onSubmit={(e) => {
+                e.preventDefault()
+                saveTemplate(savingName)
+              }}
+            >
+              <input className="text" autoFocus value={savingName} maxLength={40} onChange={(e) => setSavingName(e.target.value)} />
+              <button className="btn primary" type="submit">
+                Save
+              </button>
+              <button className="btn ghost" type="button" onClick={() => setSavingName(null)}>
+                ×
+              </button>
+            </form>
+          )}
+          {userTemplates.length > 0 && (
+            <>
+              <h3>My templates</h3>
+              <div className="tpl-grid">
+                <AnimatePresence initial={false}>
+                  {userTemplates.map((u) => (
+                    <motion.div
+                      key={u.id}
+                      className="mine-item"
+                      layout
+                      initial={{ opacity: 0, scale: 0.9 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.9 }}
+                      transition={spring}
+                    >
+                      {u.kind === 'layout' && u.template ? (
+                        <TemplateThumb
+                          t={u.template}
+                          active={project.template.id === u.template.id && !isMontage}
+                          onClick={() => applyTemplate(u)}
+                        />
+                      ) : (
+                        <button className="tpl" onClick={() => applyTemplate(u)}>
+                          <div className={'tpl-frame mine-style ' + (u.edit?.styleId ?? '')}>⚡</div>
+                          <span>{u.name}</span>
+                        </button>
+                      )}
+                      <button className="x" onClick={() => deleteTemplate(u.id)} aria-label={`Delete ${u.name}`}>
+                        ×
+                      </button>
+                    </motion.div>
+                  ))}
+                </AnimatePresence>
+              </div>
+            </>
+          )}
+          <div className="mine-io">
+            {userTemplates.length > 0 && (
+              <button className="btn ghost tiny" onClick={exportTemplates}>
+                Export file
+              </button>
+            )}
+            <button className="btn ghost tiny" onClick={() => importRef.current?.click()}>
+              Import file
+            </button>
+            <input
+              ref={importRef}
+              type="file"
+              accept="application/json,.json"
+              hidden
+              onChange={(e) => {
+                const f = e.target.files?.[0]
+                e.target.value = ''
+                if (f) importTemplates(f)
+              }}
+            />
+          </div>
+        </div>
         {isMontage ? (
           <>
             <h3>1. Pick a style</h3>
@@ -727,7 +990,17 @@ export default function App() {
 
       <main className="center">
         <div className="stage-wrap" ref={stageWrapRef} style={{ ['--ar' as string]: `${out.w} / ${out.h}` }}>
-          <div className="stage" style={{ width: stageSize.w, height: stageSize.h }}>
+          <div
+            className="stage"
+            ref={stageRef}
+            style={{ width: stageSize.w, height: stageSize.h }}
+            onPointerDown={(e) => {
+              if (e.target === e.currentTarget || e.target instanceof HTMLCanvasElement) {
+                setPick(null)
+                setSelected(null)
+              }
+            }}
+          >
             <canvas ref={canvasRef} />
             {isMontage && !montageReady && (
               <button className="montage-drop" onClick={() => ((pickTarget.current = null), fileRef.current?.click())}>
@@ -751,8 +1024,10 @@ export default function App() {
                       (armed && !has ? ' armed' : '')
                     }
                     style={{ left: `${r.x * 100}%`, top: `${r.y * 100}%`, width: `${r.w * 100}%`, height: `${r.h * 100}%` }}
-                    draggable={has}
-                    onDragStart={(e) => e.dataTransfer.setData('text/fastcut-slot', String(i))}
+                    onPointerDown={(e) => {
+                      setPick(null)
+                      beginDrag(e, rectToBox(r), 'move', false, (b) => setRegion(i, boxToRect(b)))
+                    }}
                     onDragOver={(e) => {
                       e.preventDefault()
                       e.stopPropagation()
@@ -771,6 +1046,7 @@ export default function App() {
                       setSelected(i)
                     }}
                     onClick={() => {
+                      if (justDragged.current) return
                       if (armed) {
                         place(i, armed)
                         setArmed(null)
@@ -791,11 +1067,73 @@ export default function App() {
                       </div>
                     )}
                     {has && !s.muted && <span className="badge">🔊</span>}
+                    {handles((e, h) => beginDrag(e, rectToBox(r), h, false, (b) => setRegion(i, boxToRect(b))))}
                   </div>
                 )
               })}
+            {els.map((el) => {
+              const b = xformBox(el.base, xformOf(el.key))
+              const on = pick === el.key
+              const x = xformOf(el.key)
+              const changed = x.dx !== 0 || x.dy !== 0 || x.scale !== 1
+              return (
+                <div
+                  key={el.key}
+                  className={'el' + (on ? ' on' : '')}
+                  style={{
+                    left: `${(b.cx - b.w / 2) * 100}%`,
+                    top: `${(b.cy - b.h / 2) * 100}%`,
+                    width: `${b.w * 100}%`,
+                    height: `${b.h * 100}%`,
+                  }}
+                  onPointerDown={(e) => {
+                    setPick(el.key)
+                    setSelected(null)
+                    if (el.key.startsWith('o:')) {
+                      setRightTab('motion')
+                      setOpenOverlay(el.key.slice(2))
+                    }
+                    beginDrag(e, b, 'move', true, (nb) => setXform(el.key, boxToXform(el.base, nb)))
+                  }}
+                >
+                  {on && (
+                    <>
+                      <span className="el-label">
+                        {el.label}
+                        {changed && (
+                          <button
+                            onPointerDown={(e) => e.stopPropagation()}
+                            onClick={() => setXform(el.key, undefined)}
+                            title="Reset position and size"
+                          >
+                            ↺
+                          </button>
+                        )}
+                      </span>
+                      {handles((e, h) => beginDrag(e, b, h, true, (nb) => setXform(el.key, boxToXform(el.base, nb))))}
+                    </>
+                  )}
+                </div>
+              )
+            })}
+            {guides?.vx && <div className="guide v" />}
+            {guides?.hy && <div className="guide h" />}
           </div>
         </div>
+
+        {(boxesEdited || (pick && els.some((e) => e.key === pick))) && (
+          <div className="stage-tools">
+            {boxesEdited && (
+              <button
+                className="btn tiny"
+                onClick={() => baseTemplate && update((p) => ({ ...p, template: { ...p.template, regions: baseTemplate.regions } }))}
+              >
+                ↺ Reset boxes
+              </button>
+            )}
+            <span className="muted">Drag to move · drag a corner to resize · ⭐ Save as my template to reuse it</span>
+          </div>
+        )}
 
         <div className="transport">
           <button className="play" onClick={togglePlay} aria-label={time.playing ? 'Pause' : 'Play'}>
@@ -1355,7 +1693,7 @@ export default function App() {
                   />
                 </div>
                 <p className="tip">
-                  Tip: click a filled box to change its sound, crop or start time. Drag one box onto another to swap them.
+                  Tip: drag a box to move it, or drag its corners to resize it. Click a filled box to change its sound, crop or start time.
                 </p>
               </>
             )}

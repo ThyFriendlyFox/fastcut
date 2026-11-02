@@ -1,1 +1,1 @@
-{"root":["./src/App.tsx","./src/beats.ts","./src/captions.ts","./src/engine.ts","./src/main.tsx","./src/montage.test.ts","./src/montage.ts","./src/montageDraw.ts","./src/overlays.ts","./src/templates.test.ts","./src/templates.ts"],"version":"5.6.3"}
+{"root":["./src/App.tsx","./src/beats.ts","./src/captions.ts","./src/elements.test.ts","./src/elements.ts","./src/engine.ts","./src/main.tsx","./src/montage.test.ts","./src/montage.ts","./src/montageDraw.ts","./src/overlays.ts","./src/templates.test.ts","./src/templates.ts","./src/userTemplates.ts"],"version":"5.6.3"}

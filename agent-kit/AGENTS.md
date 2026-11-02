@@ -32,6 +32,10 @@ Requires Node.js 20 or newer.
 6. **React never renders per frame.** The engine owns the clock and draws
    in its own `requestAnimationFrame` loop. `onTick` updates React at most
    every 100 ms.
+7. **Moves are offsets, not positions.** A moved element stores `xform`
+   (`dx`, `dy`, `scale`) on top of its default spot. Missing `xform` means
+   the default spot, so saved projects and templates keep working when a
+   default changes.
 
 ## Landmine map
 

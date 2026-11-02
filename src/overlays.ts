@@ -1,5 +1,6 @@
 // Motion graphics layered on top of any video. Drawn on the canvas, so they end up in the export.
 import { FONTS } from './montageDraw'
+import { Xform, applyXform } from './elements'
 
 export type OverlayKind = 'title' | 'lower' | 'sticker' | 'sparkles' | 'emoji' | 'countdown' | 'glitch' | 'confetti' | 'circle' | 'progress'
 
@@ -10,6 +11,7 @@ export type Overlay = {
   start: number
   duration: number
   color: string
+  xform?: Xform
 }
 
 export type Preset = { kind: OverlayKind; name: string; text: string; duration: number; color: string; hasText: boolean; full?: boolean }
@@ -43,13 +45,74 @@ const rnd = (seed: number) => {
 }
 const hashId = (id: string) => [...id].reduce((a, c) => a + c.charCodeAt(0), 0)
 
+/** Graphics that fill the whole frame cannot be moved. */
+export const MOVABLE: Record<OverlayKind, boolean> = {
+  title: true,
+  lower: true,
+  sticker: true,
+  glitch: true,
+  countdown: true,
+  sparkles: true,
+  circle: true,
+  confetti: false,
+  emoji: false,
+  progress: false,
+}
+
+/** The graphic's box in pixels at its default spot, before the user's move/resize. */
+export function overlayBase(ctx: CanvasRenderingContext2D, W: number, H: number, o: Overlay) {
+  const S = Math.min(W, H)
+  const measure = (font: string, text: string) => {
+    ctx.save()
+    ctx.font = font
+    const w = ctx.measureText(text).width
+    ctx.restore()
+    return w
+  }
+  switch (o.kind) {
+    case 'title': {
+      let size = S * 0.13
+      let w = measure(`${size}px ${FONTS.pop}`, (o.text || ' ').toUpperCase())
+      if (w > W * 0.9) {
+        size *= (W * 0.9) / w
+        w = W * 0.9
+      }
+      return { cx: W / 2, cy: H / 2 + size * 0.1, w: w + size * 0.3, h: size * 1.75 }
+    }
+    case 'lower': {
+      const size = S * 0.055
+      const w = measure(`${size}px ${FONTS.pop}`, o.text.toUpperCase()) + size * 1.4
+      return { cx: W * 0.05 + w / 2, cy: H * 0.78 + size * 0.2, w, h: size * 2.1 }
+    }
+    case 'sticker': {
+      const size = S * 0.05
+      const w = measure(`${size}px ${FONTS.pop}`, o.text.toUpperCase()) + size * 3
+      return { cx: W / 2, cy: H * 0.72, w: w * 1.05, h: size * 2.3 }
+    }
+    case 'glitch': {
+      const size = S * 0.16
+      return { cx: W / 2, cy: H / 2, w: measure(`${size}px ${FONTS.pop}`, o.text.toUpperCase()) + size * 0.3, h: size * 1.2 }
+    }
+    case 'countdown':
+      return { cx: W / 2, cy: H / 2, w: S * 0.48, h: S * 0.48 }
+    case 'sparkles':
+      return { cx: W / 2, cy: H / 2, w: S, h: S }
+    case 'circle':
+      return { cx: W / 2, cy: H / 2, w: S * 0.62, h: S * 0.46 }
+    default:
+      return null
+  }
+}
+
 export function drawOverlay(ctx: CanvasRenderingContext2D, W: number, H: number, o: Overlay, t: number) {
   const lt = t - o.start
   if (lt < 0 || lt > o.duration) return
   const S = Math.min(W, H)
   const outP = clamp((lt - (o.duration - 0.3)) / 0.3) // 0..1 during the last 0.3s
   const seed = hashId(o.id)
+  const base = o.xform && MOVABLE[o.kind] ? overlayBase(ctx, W, H, o) : null
   ctx.save()
+  if (base) applyXform(ctx, W, H, base.cx, base.cy, o.xform)
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
   switch (o.kind) {

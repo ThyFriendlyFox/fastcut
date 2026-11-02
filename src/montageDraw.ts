@@ -1,5 +1,6 @@
 import { EditStyle, FILTERS, FilterKind, Layer, Phrase, Shot, Timeline, TRANSITION_TIME } from './montage'
 import { Rect } from './templates'
+import { Xform, applyXform } from './elements'
 
 type El = HTMLVideoElement | HTMLImageElement
 type Box = { x: number; y: number; w: number; h: number }
@@ -34,7 +35,7 @@ export class MontagePainter {
     private getEl: (id: string) => El | null,
   ) {}
 
-  draw(t: number, W: number, H: number, tl: Timeline, style: EditStyle, filter: FilterKind) {
+  draw(t: number, W: number, H: number, tl: Timeline, style: EditStyle, filter: FilterKind, textX?: Xform) {
     const ctx = this.ctx
     ctx.fillStyle = '#000'
     ctx.fillRect(0, 0, W, H)
@@ -141,8 +142,12 @@ export class MontagePainter {
 
     if (phraseIdx >= 0) {
       const ph = tl.phrases[phraseIdx]
+      const base = this.wordsBase(ph, F, style)
+      this.ctx.save()
+      applyXform(this.ctx, W, H, base.cx, base.cy, textX)
       if (style.text === 'pop') this.drawPop(ph, t, F, style)
       else if (style.text === 'kinetic') this.drawKinetic(ph, t, F, style)
+      this.ctx.restore()
     }
   }
 
@@ -190,6 +195,28 @@ export class MontagePainter {
   }
 
   /** One big word at a time, popping in. */
+  /** Pixel box of the words on screen at their default spot, or null when no words show at t. */
+  wordsBox(t: number, W: number, H: number, tl: Timeline, style: EditStyle) {
+    const i = findPhrase(tl.phrases, t)
+    if (i < 0 || style.text === 'none') return null
+    return this.wordsBase(tl.phrases[i], frameRect(style, W, H), style)
+  }
+
+  private wordsBase(ph: Phrase, F: Box, style: EditStyle) {
+    if (style.text === 'pop') {
+      const word = ph.words[0].text.toUpperCase()
+      let size = Math.min(F.w, F.h) * 0.16
+      this.ctx.save()
+      this.ctx.font = `${size}px ${FONTS.pop}`
+      const mw = this.ctx.measureText(word).width
+      this.ctx.restore()
+      const w = Math.min(mw, F.w * 0.86)
+      size *= w / Math.max(1, mw)
+      return { cx: F.x + F.w / 2, cy: F.y + F.h * 0.52, w: w + size * 0.3, h: size * 1.3 }
+    }
+    return { cx: F.x + F.w / 2, cy: F.y + F.h / 2, w: F.w * 0.9, h: Math.min(F.h * 0.6, Math.min(F.w, F.h) * 0.5) }
+  }
+
   private drawPop(ph: Phrase, t: number, F: Box, style: EditStyle) {
     const ctx = this.ctx
     const word = ph.words[0].text.toUpperCase()

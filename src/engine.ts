@@ -1,9 +1,10 @@
 import { Aspect, Format, Rect, Template, outputSize } from './templates'
 import { EditStyle, FilterKind, Timeline } from './montage'
 import { MontagePainter } from './montageDraw'
-import { Overlay, drawOverlay } from './overlays'
+import { MOVABLE, Overlay, PRESETS, drawOverlay, overlayBase } from './overlays'
+import { Box, Xform, applyXform } from './elements'
 
-export type Montage = { timeline: Timeline; style: EditStyle; filter: FilterKind; handle: string }
+export type Montage = { timeline: Timeline; style: EditStyle; filter: FilterKind; handle: string; textXform?: Xform }
 
 export type Clip = {
   id: string
@@ -35,7 +36,7 @@ export type Project = {
   slots: Slot[]
   background: string
   radius: number // 0..1, fraction of max rounding
-  caption: { text: string; style: CaptionStyle; pos: CaptionPos }
+  caption: { text: string; style: CaptionStyle; pos: CaptionPos; xform?: Xform }
   musicId: string | null
   musicVolume: number
   musicStart: number // which second of the song the video starts at
@@ -347,7 +348,7 @@ export class Engine {
     const H = canvas.height
     const m = this.montage
     if (m) {
-      this.painter.draw(this.t, W, H, m.timeline, m.style, m.filter)
+      this.painter.draw(this.t, W, H, m.timeline, m.style, m.filter, m.textXform)
       const ec = m.timeline.endCardStart
       if (ec != null && this.t >= ec) this.painter.drawEndCard(this.t, ec, m.handle, W, H)
       this.drawOverlays()
@@ -390,9 +391,12 @@ export class Engine {
     let scale: number
     if (s.fit === 'cover') scale = Math.max(w / sw, h / sh)
     else {
+      // fill the empty space with a blurred, darker copy of the clip
+      const bs = Math.max(w / sw, h / sh) * 1.1
+      ctx.filter = 'blur(28px) brightness(0.6)'
+      ctx.drawImage(el, x + (w - sw * bs) / 2, y + (h - sh * bs) / 2, sw * bs, sh * bs)
+      ctx.filter = 'none'
       scale = Math.min(w / sw, h / sh)
-      ctx.fillStyle = '#000'
-      ctx.fillRect(x, y, w, h)
     }
     const dw = sw * scale
     const dh = sh * scale
@@ -400,10 +404,10 @@ export class Engine {
     ctx.restore()
   }
 
-  private drawCaption() {
+  /** Caption font size and default spot, in pixels. */
+  private captionLayout() {
     const { ctx, canvas } = this
-    const { text, style, pos } = this.project.caption
-    if (!text.trim()) return
+    const { text, pos } = this.project.caption
     const W = canvas.width
     const H = canvas.height
     let size = Math.round(Math.min(W, H) * 0.08)
@@ -414,6 +418,54 @@ export class Engine {
       ctx.font = font(size)
     }
     const y = pos === 'top' ? H * 0.1 : pos === 'middle' ? H * 0.5 : H * 0.9
+    return { size, y, tw: ctx.measureText(text).width, font: font(size) }
+  }
+
+  /**
+   * Everything the user can grab on the video right now, as fractions of the frame.
+   * `base` is the default spot; `xform` is the user's move/resize on top of it.
+   */
+  elementBoxes(): { key: string; label: string; base: Box; xform?: Xform }[] {
+    const W = this.canvas.width
+    const H = this.canvas.height
+    const norm = (b: { cx: number; cy: number; w: number; h: number }): Box => ({ cx: b.cx / W, cy: b.cy / H, w: b.w / W, h: b.h / H })
+    const out: { key: string; label: string; base: Box; xform?: Xform }[] = []
+    const m = this.montage
+    if (m) {
+      const b = this.painter.wordsBox(this.t, W, H, m.timeline, m.style)
+      if (b) out.push({ key: 'words', label: 'Words', base: norm(b), xform: m.textXform })
+    } else if (this.project.caption.text.trim()) {
+      const c = this.captionLayout()
+      out.push({
+        key: 'caption',
+        label: 'Caption',
+        base: norm({ cx: W / 2, cy: c.y, w: c.tw + c.size, h: c.size * 1.6 }),
+        xform: this.project.caption.xform,
+      })
+    }
+    for (const o of this.project.overlays ?? []) {
+      if (!MOVABLE[o.kind] || this.t < o.start || this.t > o.start + o.duration) continue
+      const b = overlayBase(this.ctx, W, H, o)
+      if (b) out.push({ key: 'o:' + o.id, label: PRESETS.find((p) => p.kind === o.kind)?.name ?? o.kind, base: norm(b), xform: o.xform })
+    }
+    return out
+  }
+
+  private drawCaption() {
+    const { ctx, canvas } = this
+    const { text, style } = this.project.caption
+    if (!text.trim()) return
+    const W = canvas.width
+    const { size, y, font } = this.captionLayout()
+    ctx.save()
+    applyXform(ctx, W, canvas.height, W / 2, y, this.project.caption.xform)
+    ctx.font = font
+    this.drawCaptionText(text, style, size, y, W)
+    ctx.restore()
+  }
+
+  private drawCaptionText(text: string, style: CaptionStyle, size: number, y: number, W: number) {
+    const ctx = this.ctx
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
     if (style === 'box') {

@@ -39,6 +39,12 @@ Each case has the same shape.
 **Shape.** Open the size menu. Pick Tall, Square or Portrait, and a quality.
 **Export.** Get the same edit at the new size.
 
+## Make your own template
+
+**Add.** Pick a template and add clips, a caption and motion graphics.
+**Shape.** Drag boxes and graphics to new spots. Drag corners to resize them. Click "Save as my template".
+**Export.** Pick the template from My templates next time. Export a file to use it on another computer.
+
 ## Brand the video
 
 **Add.** Open any project.

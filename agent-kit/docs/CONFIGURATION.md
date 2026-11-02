@@ -24,7 +24,10 @@ Deployment settings live in `vercel.json` (Vite build, output `dist/`).
 | `musicFadeIn` / `musicFadeOut` | boolean | `true` / `true` | 1.5 s fade in, 2 s fade out. |
 | `duck` | boolean | `true` | Song at 30 % while the talking clip plays. |
 | `clipVolume` | 0–1.5 | `1` | Clip sound (Layouts) or voice (Fast edits). |
-| `overlays[]` | Overlay | `[]` | Motion graphics: kind, text, start, duration, color. |
+| `overlays[]` | Overlay | `[]` | Motion graphics: kind, text, start, duration, color, `xform`. |
+| `overlays[].xform` / `caption.xform` / edit `textXform` | `{ dx, dy, scale }` | none | User move and resize. `dx`/`dy` are fractions of the frame; `scale` is 0.2–6. |
+| `template.regions` | Rect[] | the template's boxes | Edited in place when the user drags or resizes a box. |
+| My templates | localStorage `fastcut.templates.v1` | `[]` | Saved templates in this browser. Damaged or blocked storage gives an empty list. |
 | edit `styleId` | style id | `highlight` | Fast edits style. |
 | edit `voiceId` / `voiceMode` | clip id / enum | `null` / `intro` | Talking clip; shown first or as voice-over. |
 | edit `script` | string | `''` | Words on screen. Lines become phrases. |
