@@ -1,5 +1,5 @@
 export type Rect = { x: number; y: number; w: number; h: number }
-export type Aspect = '16:9' | '9:16' | '1:1'
+export type Aspect = '16:9' | '9:16' | '1:1' | '4:5'
 
 export type Template = {
   id: string
@@ -12,6 +12,26 @@ export const ASPECT_SIZE: Record<Aspect, { w: number; h: number }> = {
   '16:9': { w: 1920, h: 1080 },
   '9:16': { w: 1080, h: 1920 },
   '1:1': { w: 1080, h: 1080 },
+  '4:5': { w: 1080, h: 1350 },
+}
+
+export type Quality = 720 | 1080 | 2160
+export type Shape = 'auto' | Aspect | 'custom'
+export type Format = { shape: Shape; customW: number; customH: number; quality: Quality }
+
+export const DEFAULT_FORMAT: Format = { shape: 'auto', customW: 1280, customH: 720, quality: 1080 }
+
+const even = (n: number) => Math.max(2, Math.round(n / 2) * 2)
+
+/** Output pixel size. 'auto' follows the template or style; quality sets the short side. */
+export function outputSize(f: Format, auto: Aspect): { w: number; h: number } {
+  if (f.shape === 'custom') {
+    const c = (n: number) => even(Math.min(3840, Math.max(240, n || 0)))
+    return { w: c(f.customW), h: c(f.customH) }
+  }
+  const a = ASPECT_SIZE[f.shape === 'auto' ? auto : f.shape]
+  const k = f.quality / Math.min(a.w, a.h)
+  return { w: even(a.w * k), h: even(a.h * k) }
 }
 
 // Regions are fractions of the canvas (0..1). Gap/margins are baked in.

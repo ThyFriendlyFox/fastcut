@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Clip, Engine, Montage, Project, Slot, emptySlot } from './engine'
-import { ASPECT_SIZE, Aspect, BACKGROUNDS, TEMPLATES, Template } from './templates'
+import { ASPECT_SIZE, Aspect, BACKGROUNDS, DEFAULT_FORMAT, Format, Quality, Shape, TEMPLATES, Template, outputSize } from './templates'
 import { EDIT_STYLES, EditStyle, FilterKind, TimedWord, plan } from './montage'
 import { FONTS } from './montageDraw'
 import { SongInfo, detectBeats } from './beats'
@@ -179,6 +179,20 @@ type EditSettings = {
   onBeat: boolean
 }
 
+const SHAPES: [Shape, string, string][] = [
+  ['auto', 'Auto', ''],
+  ['16:9', 'Wide', '16/9'],
+  ['9:16', 'Tall', '9/16'],
+  ['1:1', 'Square', '1/1'],
+  ['4:5', 'Portrait', '4/5'],
+  ['custom', 'Custom', '3/2'],
+]
+const QUALITIES: [Quality, string][] = [
+  [720, '720p'],
+  [1080, '1080p'],
+  [2160, '4K'],
+]
+
 const PACES = [
   { label: 'Chill', v: 1.8 },
   { label: 'Normal', v: 1 },
@@ -249,6 +263,7 @@ export default function App() {
   const [aspectFilter, setAspectFilter] = useState<Aspect | 'all'>('all')
   const [project, setProject] = useState<Project>(() => ({
     mode: 'layout',
+    format: DEFAULT_FORMAT,
     montage: null,
     overlays: [],
     template: TEMPLATES[0],
@@ -360,13 +375,16 @@ export default function App() {
   }, [project, montage, fontsReady])
 
   const isMontage = project.mode === 'montage'
-  const stageAspect: Aspect = isMontage ? style.aspect : project.template.aspect
+  const autoAspect: Aspect = isMontage ? style.aspect : project.template.aspect
+  const out = outputSize(project.format, autoAspect)
+  const [sizeOpen, setSizeOpen] = useState(false)
+  const setFormat = (f: Partial<Format>) => update((p) => ({ ...p, format: { ...p.format, ...f } }))
 
   // fit stage into available space
   useLayoutEffect(() => {
     const el = stageWrapRef.current!
     const ro = new ResizeObserver(() => {
-      const a = ASPECT_SIZE[stageAspect]
+      const a = out
       const W = el.clientWidth
       const H = el.clientHeight
       const scale = Math.min(W / a.w, H / a.h)
@@ -374,7 +392,7 @@ export default function App() {
     })
     ro.observe(el)
     return () => ro.disconnect()
-  }, [stageAspect])
+  }, [out.w, out.h])
 
   const update = useCallback((fn: (p: Project) => Project) => setProject((p) => fn(p)), [])
 
@@ -570,6 +588,73 @@ export default function App() {
           <li className={step === 2 ? 'now' : step > 2 ? 'done' : ''}>{isMontage ? 'Add your clips' : 'Drag clips into the boxes'}</li>
           <li className={step === 3 ? 'now' : ''}>Export</li>
         </ol>
+        <div className="size-wrap">
+          <button className="btn size-btn" onClick={() => setSizeOpen((o) => !o)} aria-expanded={sizeOpen}>
+            📐 {out.w}×{out.h}
+          </button>
+          <AnimatePresence>
+            {sizeOpen && (
+              <>
+                <div className="size-scrim" onClick={() => setSizeOpen(false)} />
+                <motion.div
+                  className="size-menu"
+                  initial={{ opacity: 0, y: -8, scale: 0.97 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: -8, scale: 0.97 }}
+                  transition={spring}
+                >
+                  <h3>Video size</h3>
+                  <div className="shape-grid">
+                    {SHAPES.map(([k, label, ar]) => (
+                      <button key={k} className={'shape' + (project.format.shape === k ? ' on' : '')} onClick={() => setFormat({ shape: k })}>
+                        <span className="shape-box" style={{ aspectRatio: k === 'auto' ? `${ASPECT_SIZE[autoAspect].w}/${ASPECT_SIZE[autoAspect].h}` : ar }} />
+                        <b>{label}</b>
+                        <span>{k === 'auto' ? autoAspect : k === 'custom' ? 'any size' : k}</span>
+                      </button>
+                    ))}
+                  </div>
+                  {project.format.shape === 'custom' ? (
+                    <div className="custom-size">
+                      <input
+                        className="text"
+                        type="number"
+                        min={240}
+                        max={3840}
+                        value={project.format.customW}
+                        onChange={(e) => setFormat({ customW: Number(e.target.value) })}
+                        aria-label="Width"
+                      />
+                      <span>×</span>
+                      <input
+                        className="text"
+                        type="number"
+                        min={240}
+                        max={3840}
+                        value={project.format.customH}
+                        onChange={(e) => setFormat({ customH: Number(e.target.value) })}
+                        aria-label="Height"
+                      />
+                    </div>
+                  ) : (
+                    <>
+                      <h3>Quality</h3>
+                      <div className="seg">
+                        {QUALITIES.map(([q, l]) => (
+                          <button key={q} className={project.format.quality === q ? 'on' : ''} onClick={() => setFormat({ quality: q })}>
+                            {l}
+                          </button>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                  <p className="hint-text">
+                    Exports at {out.w}×{out.h} pixels.{out.w * out.h > 3e6 ? ' 4K is slow on older computers.' : ''}
+                  </p>
+                </motion.div>
+              </>
+            )}
+          </AnimatePresence>
+        </div>
         <button className="btn primary" disabled={!canExport} onClick={startExport}>
           ⬇ Export video
         </button>
@@ -613,7 +698,7 @@ export default function App() {
       </aside>
 
       <main className="center">
-        <div className="stage-wrap" ref={stageWrapRef} style={{ ['--ar' as string]: `${ASPECT_SIZE[project.template.aspect].w} / ${ASPECT_SIZE[project.template.aspect].h}` }}>
+        <div className="stage-wrap" ref={stageWrapRef} style={{ ['--ar' as string]: `${out.w} / ${out.h}` }}>
           <div className="stage" style={{ width: stageSize.w, height: stageSize.h }}>
             <canvas ref={canvasRef} />
             {isMontage && !montageReady && (

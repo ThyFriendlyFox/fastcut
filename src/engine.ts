@@ -1,4 +1,4 @@
-import { ASPECT_SIZE, Aspect, Rect, Template } from './templates'
+import { Aspect, Format, Rect, Template, outputSize } from './templates'
 import { EditStyle, FilterKind, Timeline } from './montage'
 import { MontagePainter } from './montageDraw'
 import { Overlay, drawOverlay } from './overlays'
@@ -28,6 +28,7 @@ export type CaptionPos = 'top' | 'middle' | 'bottom'
 
 export type Project = {
   mode: 'layout' | 'montage'
+  format: Format
   overlays: Overlay[]
   montage: Montage | null
   template: Template
@@ -94,15 +95,19 @@ export class Engine {
     return p.mode === 'montage' && p.montage ? p.montage.style.aspect : p.template.aspect
   }
 
+  size(p = this.project) {
+    return outputSize(p.format, this.aspect(p))
+  }
+
   get montage() {
     return this.project.mode === 'montage' ? this.project.montage : null
   }
 
   setProject(p: Project) {
-    const prevAspect = this.project ? this.aspect() : null
+    const prev = this.project ? this.size() : null
     this.project = p
-    if (prevAspect !== this.aspect(p)) {
-      const s = ASPECT_SIZE[this.aspect(p)]
+    const s = this.size(p)
+    if (!prev || prev.w !== s.w || prev.h !== s.h) {
       this.canvas.width = s.w
       this.canvas.height = s.h
     }
@@ -448,7 +453,8 @@ export class Engine {
     ])
     const rec = new MediaRecorder(stream, {
       mimeType: mime || undefined,
-      videoBitsPerSecond: 8_000_000,
+      // ~8 Mbps at 1080p, scaled by pixel count
+      videoBitsPerSecond: Math.round(Math.min(40e6, Math.max(3e6, (8e6 * this.canvas.width * this.canvas.height) / (1920 * 1080)))),
     })
     const chunks: Blob[] = []
     rec.ondataavailable = (e) => e.data.size && chunks.push(e.data)
