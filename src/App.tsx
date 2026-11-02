@@ -3,12 +3,104 @@ import { Clip, Engine, Montage, Project, Slot, emptySlot } from './engine'
 import { ASPECT_SIZE, Aspect, BACKGROUNDS, TEMPLATES, Template } from './templates'
 import { EDIT_STYLES, EditStyle, FilterKind, TimedWord, plan } from './montage'
 import { FONTS } from './montageDraw'
-import { detectBeats } from './beats'
+import { SongInfo, detectBeats } from './beats'
 import { transcribe } from './captions'
 import { OVERLAY_COLORS, Overlay, PRESETS, Preset, drawOverlay } from './overlays'
 import { AnimatePresence, motion } from 'motion/react'
 
 const spring = { type: 'spring', stiffness: 500, damping: 34 } as const
+
+/** Song waveform with a draggable window showing which part of the song plays under the video. */
+function SongStrip({
+  song,
+  start,
+  length,
+  t,
+  fadeIn,
+  fadeOut,
+  onStart,
+}: {
+  song: SongInfo
+  start: number
+  length: number
+  t: number
+  fadeIn: boolean
+  fadeOut: boolean
+  onStart: (s: number) => void
+}) {
+  const ref = useRef<HTMLCanvasElement>(null)
+  const wrap = useRef<HTMLDivElement>(null)
+  const drag = useRef<{ x: number; start: number } | null>(null)
+  const maxStart = Math.max(0, song.duration - Math.min(length, song.duration))
+  const winW = Math.min(1, length / song.duration)
+  const winX = song.duration ? start / song.duration : 0
+
+  useEffect(() => {
+    const c = ref.current!
+    const r = c.getBoundingClientRect()
+    const dpr = window.devicePixelRatio || 1
+    c.width = r.width * dpr
+    c.height = r.height * dpr
+    const ctx = c.getContext('2d')!
+    const W = c.width
+    const H = c.height
+    ctx.clearRect(0, 0, W, H)
+    const n = song.peaks.length
+    const bw = W / n
+    for (let i = 0; i < n; i++) {
+      const x = i * bw
+      const f = i / n
+      const inWin = f >= winX && f <= winX + winW
+      let h = song.peaks[i] * H * 0.9
+      if (inWin) {
+        const local = (f - winX) * song.duration
+        const left = (winX + winW - f) * song.duration
+        if (fadeIn) h *= Math.min(1, local / 1.5)
+        if (fadeOut) h *= Math.min(1, left / 2)
+      }
+      ctx.fillStyle = inWin ? '#ff3d6e' : 'rgba(255,255,255,0.22)'
+      ctx.fillRect(x, (H - h) / 2, Math.max(1, bw - dpr), Math.max(dpr, h))
+    }
+    // beat ticks inside the window
+    ctx.fillStyle = 'rgba(255,255,255,0.5)'
+    for (const b of song.beats) {
+      const f = b / song.duration
+      if (f >= winX && f <= winX + winW) ctx.fillRect(f * W, H - 4 * dpr, dpr, 4 * dpr)
+    }
+  }, [song, winX, winW, fadeIn, fadeOut])
+
+  const toSec = (dx: number) => (dx / (wrap.current?.clientWidth || 1)) * song.duration
+  const head = winX + Math.min(t, length) / song.duration
+
+  return (
+    <div
+      className="song-strip"
+      ref={wrap}
+      onPointerDown={(e) => {
+        const r = wrap.current!.getBoundingClientRect()
+        const f = (e.clientX - r.left) / r.width
+        ;(e.target as HTMLElement).setPointerCapture(e.pointerId)
+        // clicking outside the window jumps it there (centered)
+        if (f < winX || f > winX + winW) {
+          const ns = Math.max(0, Math.min(maxStart, f * song.duration - length / 2))
+          onStart(ns)
+          drag.current = { x: e.clientX, start: ns }
+        } else drag.current = { x: e.clientX, start }
+      }}
+      onPointerMove={(e) => {
+        if (!drag.current) return
+        onStart(Math.max(0, Math.min(maxStart, drag.current.start + toSec(e.clientX - drag.current.x))))
+      }}
+      onPointerUp={() => (drag.current = null)}
+    >
+      <canvas ref={ref} />
+      <div className="song-win" style={{ left: `${winX * 100}%`, width: `${winW * 100}%` }}>
+        <span>{fmt(start)}</span>
+      </div>
+      <div className="song-head" style={{ left: `${head * 100}%` }} />
+    </div>
+  )
+}
 
 /** Live looping preview of a motion graphic, drawn with the same code as the export. */
 function OverlayPreview({ preset }: { preset: Preset }) {
@@ -166,6 +258,11 @@ export default function App() {
     caption: { text: '', style: 'classic', pos: 'bottom' },
     musicId: null,
     musicVolume: 0.6,
+    musicStart: 0,
+    musicFadeIn: true,
+    musicFadeOut: true,
+    duck: true,
+    clipVolume: 1,
     loopShort: true,
     imageSeconds: 5,
   }))
@@ -191,7 +288,7 @@ export default function App() {
     filter: null,
     onBeat: true,
   })
-  const [beats, setBeats] = useState<{ id: string; bpm: number; beats: number[] } | null>(null)
+  const [beats, setBeats] = useState<(SongInfo & { id: string }) | null>(null)
   const [capStatus, setCapStatus] = useState<string | null>(null)
   const [fontsReady, setFontsReady] = useState(0)
   const patchEdit = (p: Partial<EditSettings>) => setEdit((e) => ({ ...e, ...p }))
@@ -223,7 +320,8 @@ export default function App() {
   const montage: Montage | null = useMemo(() => {
     const visual = clips.filter((c) => c.kind !== 'audio')
     const voice = edit.voiceId ? clips.find((c) => c.id === edit.voiceId && c.kind === 'video') ?? null : null
-    const songBeats = edit.onBeat && beats && beats.id === project.musicId ? beats.beats : null
+    const songBeats =
+      edit.onBeat && beats && beats.id === project.musicId ? beats.beats.map((b) => b - project.musicStart).filter((b) => b >= 0) : null
     const timeline = plan({
       style,
       clips: visual,
@@ -237,12 +335,13 @@ export default function App() {
       handle: edit.handle,
     })
     return { timeline, style, filter: edit.filter ?? style.filter, handle: edit.handle }
-  }, [clips, edit, style, beats, project.musicId])
+  }, [clips, edit, style, beats, project.musicId, project.musicStart])
 
   // engine lifecycle
   useEffect(() => {
     const e = new Engine(canvasRef.current!)
     engineRef.current = e
+    ;(window as unknown as { fastcut: Engine }).fastcut = e // handy for debugging
     e.setProject(project)
     let last = 0
     e.onTick = (t, total, playing) => {
@@ -336,7 +435,7 @@ export default function App() {
         slots[k] = { ...emptySlot(), clipId: c.id, muted: anySound || c.kind !== 'video' }
         if (c.kind === 'video') anySound = true
       })
-      return { ...p, slots, musicId: audio ? audio.id : p.musicId }
+      return { ...p, slots, musicId: audio ? audio.id : p.musicId, musicStart: audio ? 0 : p.musicStart }
     })
   }
 
@@ -601,6 +700,73 @@ export default function App() {
           <span className="time">{fmt(time.total)}</span>
         </div>
 
+        <section className="audio-bar">
+          <div className="audio-head">
+            <h3>🎵 Audio</h3>
+            {project.musicId ? (
+              <>
+                <span className="song-name">{audioClips.find((c) => c.id === project.musicId)?.name}</span>
+                <button className="btn tiny" onClick={() => musicRef.current?.click()}>
+                  Change song
+                </button>
+                <button className="btn tiny danger" onClick={() => update((p) => ({ ...p, musicId: null }))}>
+                  Remove
+                </button>
+              </>
+            ) : (
+              <button className="btn tiny" onClick={() => musicRef.current?.click()}>
+                + Add a song (MP3)
+              </button>
+            )}
+          </div>
+          {project.musicId && beats?.id === project.musicId && (
+            <>
+              <SongStrip
+                song={beats}
+                start={project.musicStart}
+                length={time.total}
+                t={time.t}
+                fadeIn={project.musicFadeIn}
+                fadeOut={project.musicFadeOut}
+                onStart={(st) => update((p) => ({ ...p, musicStart: st }))}
+              />
+              <p className="hint-text strip-hint">Drag the pink part to choose which bit of the song plays.</p>
+            </>
+          )}
+          {project.musicId && beats?.id !== project.musicId && <p className="hint-text">Reading the song…</p>}
+          <div className="audio-controls">
+            {project.musicId && (
+              <label className="knob">
+                <span>Song {Math.round(project.musicVolume * 100)}%</span>
+                <input type="range" min={0} max={1} step={0.05} value={project.musicVolume} onChange={(e) => update((p) => ({ ...p, musicVolume: Number(e.target.value) }))} />
+              </label>
+            )}
+            {(!isMontage || edit.voiceId) && (
+            <label className="knob">
+              <span>
+                {isMontage ? 'Voice' : 'Clip sound'} {project.clipVolume === 0 ? '(muted)' : Math.round(project.clipVolume * 100) + '%'}
+              </span>
+              <input type="range" min={0} max={1.5} step={0.05} value={project.clipVolume} onChange={(e) => update((p) => ({ ...p, clipVolume: Number(e.target.value) }))} />
+            </label>
+            )}
+            {project.musicId && (
+              <div className="toggles">
+                <button className={'toggle' + (project.musicFadeIn ? ' on' : '')} onClick={() => update((p) => ({ ...p, musicFadeIn: !p.musicFadeIn }))}>
+                  Fade in
+                </button>
+                <button className={'toggle' + (project.musicFadeOut ? ' on' : '')} onClick={() => update((p) => ({ ...p, musicFadeOut: !p.musicFadeOut }))}>
+                  Fade out
+                </button>
+                {isMontage && edit.voiceId && (
+                  <button className={'toggle' + (project.duck ? ' on' : '')} onClick={() => update((p) => ({ ...p, duck: !p.duck }))}>
+                    Quieter when I talk
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        </section>
+
         <section className="bin">
           <div className="bin-head">
             <h3>Your clips</h3>
@@ -806,29 +972,11 @@ export default function App() {
               {edit.words && edit.wordsFor === edit.voiceId && <p className="hint-text">Timed to your voice. You can fix typos.</p>}
             </div>
 
-            <h3>Music</h3>
-            {project.musicId ? (
-              <div className="field">
-                <div className="music">
-                  <span>🎵 {audioClips.find((c) => c.id === project.musicId)?.name}</span>
-                  <button className="x inline" onClick={() => update((p) => ({ ...p, musicId: null }))} aria-label="Remove music">
-                    ×
-                  </button>
-                </div>
-                <button className="btn full small-gap" onClick={() => musicRef.current?.click()}>
-                  Change song
-                </button>
-                <label className="check">
-                  <input type="checkbox" checked={edit.onBeat} onChange={(e) => patchEdit({ onBeat: e.target.checked })} />
-                  {beats?.id === project.musicId ? `Cut on the beat (${beats.bpm} BPM)` : 'Finding the beat…'}
-                </label>
-                <label>Music volume</label>
-                <input type="range" min={0} max={1} step={0.05} value={project.musicVolume} onChange={(e) => update((p) => ({ ...p, musicVolume: Number(e.target.value) }))} />
-              </div>
-            ) : (
-              <button className="btn full" onClick={() => musicRef.current?.click()}>
-                + Add a song (MP3)
-              </button>
+            {project.musicId && (
+              <label className="check">
+                <input type="checkbox" checked={edit.onBeat} onChange={(e) => patchEdit({ onBeat: e.target.checked })} />
+                {beats?.id === project.musicId ? `Cut on the song's beat (${beats.bpm} BPM)` : 'Finding the beat…'}
+              </label>
             )}
 
             <h3>Pace</h3>
@@ -982,24 +1130,6 @@ export default function App() {
               </div>
             </div>
 
-            <h3>Music</h3>
-            {project.musicId ? (
-              <div className="field">
-                <div className="music">
-                  <span>🎵 {audioClips.find((c) => c.id === project.musicId)?.name}</span>
-                  <button className="x inline" onClick={() => update((p) => ({ ...p, musicId: null }))} aria-label="Remove music">
-                    ×
-                  </button>
-                </div>
-                <label>Music volume</label>
-                <input type="range" min={0} max={1} step={0.05} value={project.musicVolume} onChange={(e) => update((p) => ({ ...p, musicVolume: Number(e.target.value) }))} />
-              </div>
-            ) : (
-              <button className="btn full" onClick={() => musicRef.current?.click()}>
-                + Add a song
-              </button>
-            )}
-
             <h3>Timing</h3>
             <label className="check">
               <input type="checkbox" checked={project.loopShort} onChange={(e) => update((p) => ({ ...p, loopShort: e.target.checked }))} />
@@ -1042,7 +1172,7 @@ export default function App() {
           if (!c) return
           engineRef.current!.addClip(c)
           setClips((cs) => [...cs, { id: c.id, name: c.name, kind: 'audio', url: c.url, duration: c.duration }])
-          update((p) => ({ ...p, musicId: c.id }))
+          update((p) => ({ ...p, musicId: c.id, musicStart: 0 }))
         }}
       />
 

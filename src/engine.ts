@@ -37,6 +37,11 @@ export type Project = {
   caption: { text: string; style: CaptionStyle; pos: CaptionPos }
   musicId: string | null
   musicVolume: number
+  musicStart: number // which second of the song the video starts at
+  musicFadeIn: boolean
+  musicFadeOut: boolean
+  duck: boolean // turn the song down while the talking clip plays
+  clipVolume: number // volume of clip sounds / voice
   loopShort: boolean
   imageSeconds: number
 }
@@ -112,7 +117,7 @@ export class Engine {
       this.music.el.loop = true
       this.route(this.music.el)
       if (this.playing) {
-        this.music.el.currentTime = this.t % (m.duration || 1)
+        this.music.el.currentTime = this.musicTime()
         this.music.el.play().catch(() => {})
       }
     }
@@ -192,9 +197,9 @@ export class Engine {
       if (!(c.el instanceof HTMLMediaElement)) continue
       const g = this.gains.get(c.el)
       if (!g) continue
-      let v = audible.has(c.id) ? 1 : 0
-      if (c.id === this.project.musicId) v = this.project.musicVolume
-      g.gain.value = v
+      let v = audible.has(c.id) ? this.project.clipVolume : 0
+      if (c.id === this.project.musicId) v = this.musicLevel()
+      g.gain.setTargetAtTime(v, this.audio.currentTime, 0.03)
     }
   }
 
@@ -231,11 +236,35 @@ export class Engine {
       }
     }
     if (this.music) {
-      const m = this.music.el
-      if (force) m.currentTime = this.t % (m.duration || 1)
-      if (play && m.paused) m.play().catch(() => {})
-      if (!play && !m.paused) m.pause()
+      this.syncMusic(play, force)
     }
+  }
+
+  /** Where in the song we should be right now. */
+  musicTime(t = this.t) {
+    const d = this.music?.el.duration || this.music?.clip.duration || 1
+    return (this.project.musicStart + t) % d
+  }
+
+  private syncMusic(play: boolean, force: boolean) {
+    if (!this.music) return
+    const m = this.music.el
+    const want = this.musicTime()
+    if (force || (play && Math.abs(m.currentTime - want) > 0.3 && !m.seeking)) m.currentTime = want
+    if (play && m.paused) m.play().catch(() => {})
+    if (!play && !m.paused) m.pause()
+  }
+
+  /** Song volume right now, including fades and ducking. */
+  private musicLevel() {
+    const p = this.project
+    const total = this.totalDuration()
+    let v = p.musicVolume
+    if (p.musicFadeIn) v *= Math.min(1, this.t / 1.5)
+    if (p.musicFadeOut) v *= Math.min(1, Math.max(0, (total - this.t) / 2))
+    const voice = this.montage?.timeline
+    if (p.duck && voice?.voiceId && this.t < voice.voiceEnd) v *= 0.3
+    return v
   }
 
   private syncAll(play: boolean, force = false) {
@@ -250,12 +279,7 @@ export class Engine {
       if (play && !finished && v.paused) v.play().catch(() => {})
       if ((!play || finished) && !v.paused) v.pause()
     }
-    if (this.music) {
-      const m = this.music.el
-      if (force) m.currentTime = this.t % (m.duration || 1)
-      if (play && m.paused) m.play().catch(() => {})
-      if (!play && !m.paused) m.pause()
-    }
+    this.syncMusic(play, force)
   }
 
   play() {
@@ -302,6 +326,10 @@ export class Engine {
         this.lastSync = performance.now()
         this.syncAll(true)
       }
+    }
+    if (this.music && this.audio) {
+      const g = this.gains.get(this.music.el)
+      if (g) g.gain.setTargetAtTime(this.musicLevel(), this.audio.currentTime, 0.05)
     }
     this.draw()
     this.onTick?.(this.t, total, this.playing)

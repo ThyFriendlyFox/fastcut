@@ -213,3 +213,24 @@ textarea.text { resize: vertical; min-height: 80px; }
 .fx-body label { font-size: 12px; color: var(--muted); }
 .swatches.small .swatch { width: 22px; height: 22px; }
 .small-gap { margin-bottom: 8px; }
+
+/* ---------- Audio bar ---------- */
+.audio-bar { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.audio-head { display: flex; align-items: center; gap: 10px; }
+.audio-head h3 { margin: 0; }
+.song-name { flex: 1; min-width: 0; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.audio-head .btn.tiny:first-of-type:last-child { margin-left: auto; }
+.btn.tiny { padding: 5px 10px; font-size: 12px; border-radius: 8px; }
+.song-strip { position: relative; height: 54px; background: var(--bg); border-radius: 8px; overflow: hidden; cursor: grab; touch-action: none; user-select: none; }
+.song-strip:active { cursor: grabbing; }
+.song-strip canvas { width: 100%; height: 100%; display: block; }
+.song-win { position: absolute; top: 0; bottom: 0; border: 2px solid var(--accent); border-radius: 6px; background: rgba(255,61,110,.1); pointer-events: none; }
+.song-win span { position: absolute; top: 2px; left: 4px; font-size: 10px; font-weight: 700; background: var(--accent); color: #fff; padding: 0 4px; border-radius: 4px; }
+.song-head { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff; pointer-events: none; }
+.strip-hint { margin: -2px 0 0; }
+.audio-controls { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; }
+.knob { display: flex; flex-direction: column; gap: 2px; min-width: 150px; flex: 1; font-size: 12px; color: var(--muted); }
+.toggles { display: flex; gap: 6px; flex-wrap: wrap; }
+.toggle { border: 1px solid var(--line); background: var(--bg); color: var(--muted); padding: 6px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+.toggle.on { background: rgba(61,220,151,.15); border-color: #3ddc97; color: #3ddc97; }
+.toggle.on::before { content: '✓ '; }

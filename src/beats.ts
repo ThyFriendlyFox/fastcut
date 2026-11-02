@@ -1,9 +1,23 @@
 /** Finds the beat grid of a song: low-pass to hear the kick, onset envelope, tempo by autocorrelation. */
-export async function detectBeats(url: string): Promise<{ bpm: number; beats: number[] }> {
+export type SongInfo = { bpm: number; beats: number[]; peaks: number[]; duration: number }
+
+export async function detectBeats(url: string): Promise<SongInfo> {
   const buf = await (await fetch(url)).arrayBuffer()
   const sr = 22050
   const tmp = new OfflineAudioContext(1, sr, sr)
   const decoded = await tmp.decodeAudioData(buf)
+  // waveform for the audio strip
+  const raw = decoded.getChannelData(0)
+  const bins = 600
+  const per = Math.max(1, Math.floor(raw.length / bins))
+  const peaks: number[] = []
+  for (let b = 0; b < bins; b++) {
+    let m = 0
+    for (let j = b * per; j < (b + 1) * per && j < raw.length; j += 4) m = Math.max(m, Math.abs(raw[j]))
+    peaks.push(m)
+  }
+  const top = Math.max(...peaks) || 1
+  for (let b = 0; b < bins; b++) peaks[b] /= top
   const len = Math.min(decoded.duration, 240)
   const off = new OfflineAudioContext(1, Math.ceil(len * sr), sr)
   const src = off.createBufferSource()
@@ -58,7 +72,7 @@ export async function detectBeats(url: string): Promise<{ bpm: number; beats: nu
   const period = bestLag / fps
   const beats: number[] = []
   for (let t = bestPhase / fps; t < len; t += period) beats.push(t)
-  return { bpm: Math.round(60 / period), beats }
+  return { bpm: Math.round(60 / period), beats, peaks, duration: decoded.duration }
 }
 
 function interp(a: Float32Array, x: number) {
