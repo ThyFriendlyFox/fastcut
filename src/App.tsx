@@ -1,6 +1,38 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Clip, Engine, Project, Slot, emptySlot } from './engine'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Clip, Engine, Montage, Project, Slot, emptySlot } from './engine'
 import { ASPECT_SIZE, Aspect, BACKGROUNDS, TEMPLATES, Template } from './templates'
+import { EDIT_STYLES, EditStyle, FilterKind, TimedWord, plan } from './montage'
+import { FONTS } from './montageDraw'
+import { detectBeats } from './beats'
+import { transcribe } from './captions'
+import { OVERLAY_COLORS, Overlay, PRESETS, Preset, drawOverlay } from './overlays'
+import { AnimatePresence, motion } from 'motion/react'
+
+const spring = { type: 'spring', stiffness: 500, damping: 34 } as const
+
+/** Live looping preview of a motion graphic, drawn with the same code as the export. */
+function OverlayPreview({ preset }: { preset: Preset }) {
+  const ref = useRef<HTMLCanvasElement>(null)
+  useEffect(() => {
+    const c = ref.current!
+    const ctx = c.getContext('2d')!
+    const o: Overlay = { id: 'preview-' + preset.kind, kind: preset.kind, text: preset.text, start: 0, duration: Math.min(preset.duration, 3), color: preset.color }
+    let raf = 0
+    const loop = (now: number) => {
+      const t = (now / 1000) % (o.duration + 0.6)
+      const g = ctx.createLinearGradient(0, 0, c.width, c.height)
+      g.addColorStop(0, '#2b2d42')
+      g.addColorStop(1, '#5c4d7d')
+      ctx.fillStyle = g
+      ctx.fillRect(0, 0, c.width, c.height)
+      drawOverlay(ctx, c.width, c.height, o, t)
+      raf = requestAnimationFrame(loop)
+    }
+    raf = requestAnimationFrame(loop)
+    return () => cancelAnimationFrame(raf)
+  }, [preset])
+  return <canvas ref={ref} width={320} height={180} />
+}
 
 const uid = () => Math.random().toString(36).slice(2, 10)
 const fmt = (s: number) => {
@@ -41,6 +73,60 @@ function loadClip(file: File): Promise<Clip | null> {
   return Promise.resolve(null)
 }
 
+type EditSettings = {
+  styleId: string
+  voiceId: string | null
+  voiceMode: 'intro' | 'over'
+  words: TimedWord[] | null
+  wordsFor: string | null
+  script: string
+  speed: number
+  length: number
+  handle: string
+  filter: FilterKind | null
+  onBeat: boolean
+}
+
+const PACES = [
+  { label: 'Chill', v: 1.8 },
+  { label: 'Normal', v: 1 },
+  { label: 'Fast', v: 0.6 },
+  { label: 'Insane', v: 0.4 },
+]
+const FILTER_LABELS: [FilterKind, string][] = [
+  ['none', 'Original'],
+  ['bw', 'B&W'],
+  ['warm', 'Warm'],
+  ['film', 'Moody'],
+  ['vivid', 'Vivid'],
+]
+
+function StyleCard({ s, active, onClick }: { s: EditStyle; active: boolean; onClick: () => void }) {
+  const a = ASPECT_SIZE[s.aspect]
+  const sample = s.frame === 'card' ? 'RISE' : s.text === 'kinetic' ? 'DREAM' : 'WOW'
+  return (
+    <motion.button className={'style-card' + (active ? ' active' : '')} onClick={onClick} whileTap={{ scale: 0.97 }} whileHover={{ x: 3 }} transition={spring}>
+      <div className={'style-prev ' + s.id + (s.aspect === '9:16' ? ' tall' : '')} style={{ aspectRatio: `${a.w}/${a.h}` }}>
+        <div className={'style-inner frame-' + s.frame}>
+          <span
+            style={{
+              fontFamily: s.text === 'kinetic' ? FONTS.serif : FONTS.pop,
+              color: s.textColor,
+              transform: s.text === 'kinetic' ? 'scaleX(0.6)' : undefined,
+            }}
+          >
+            {sample}
+          </span>
+        </div>
+      </div>
+      <div className="style-text">
+        <b>{s.name}</b>
+        <span>{s.blurb}</span>
+      </div>
+    </motion.button>
+  )
+}
+
 function TemplateThumb({ t, active, onClick }: { t: Template; active: boolean; onClick: () => void }) {
   const a = ASPECT_SIZE[t.aspect]
   return (
@@ -70,6 +156,9 @@ export default function App() {
   const [clips, setClips] = useState<ClipInfo[]>([])
   const [aspectFilter, setAspectFilter] = useState<Aspect | 'all'>('all')
   const [project, setProject] = useState<Project>(() => ({
+    mode: 'layout',
+    montage: null,
+    overlays: [],
     template: TEMPLATES[0],
     slots: TEMPLATES[0].regions.map(emptySlot),
     background: BACKGROUNDS[0],
@@ -81,12 +170,74 @@ export default function App() {
     imageSeconds: 5,
   }))
   const [selected, setSelected] = useState<number | null>(null)
+  const [rightTab, setRightTab] = useState<'edit' | 'motion'>('edit')
+  const [openOverlay, setOpenOverlay] = useState<string | null>(null)
   const [armed, setArmed] = useState<string | null>(null)
   const [dragOver, setDragOver] = useState<number | null>(null)
   const [time, setTime] = useState({ t: 0, total: 5, playing: false })
   const [stageSize, setStageSize] = useState({ w: 0, h: 0 })
   const [exporting, setExporting] = useState<null | { progress: number; url?: string; ext?: string }>(null)
   const exportCancelled = useRef(false)
+  const [edit, setEdit] = useState<EditSettings>({
+    styleId: EDIT_STYLES[0].id,
+    voiceId: null,
+    voiceMode: 'intro',
+    words: null,
+    wordsFor: null,
+    script: '',
+    speed: 1,
+    length: 12,
+    handle: '',
+    filter: null,
+    onBeat: true,
+  })
+  const [beats, setBeats] = useState<{ id: string; bpm: number; beats: number[] } | null>(null)
+  const [capStatus, setCapStatus] = useState<string | null>(null)
+  const [fontsReady, setFontsReady] = useState(0)
+  const patchEdit = (p: Partial<EditSettings>) => setEdit((e) => ({ ...e, ...p }))
+  const style = EDIT_STYLES.find((x) => x.id === edit.styleId)!
+
+  useEffect(() => {
+    Promise.all(
+      ['48px Anton', '700 48px "Playfair Display"', '400 48px "Playfair Display"', '48px "Great Vibes"'].map((f) => document.fonts.load(f)),
+    )
+      .catch(() => {})
+      .then(() => setFontsReady((n) => n + 1))
+  }, [])
+
+  // find the beat of the song so cuts can land on it
+  useEffect(() => {
+    const id = project.musicId
+    if (!id || beats?.id === id) return
+    const c = clips.find((x) => x.id === id)
+    if (!c) return
+    let alive = true
+    detectBeats(c.url)
+      .then((b) => alive && setBeats({ id, ...b }))
+      .catch((e) => console.warn('beat detection failed', e))
+    return () => {
+      alive = false
+    }
+  }, [project.musicId, clips, beats?.id])
+
+  const montage: Montage | null = useMemo(() => {
+    const visual = clips.filter((c) => c.kind !== 'audio')
+    const voice = edit.voiceId ? clips.find((c) => c.id === edit.voiceId && c.kind === 'video') ?? null : null
+    const songBeats = edit.onBeat && beats && beats.id === project.musicId ? beats.beats : null
+    const timeline = plan({
+      style,
+      clips: visual,
+      voice,
+      voiceMode: edit.voiceMode,
+      words: voice && edit.wordsFor === voice.id ? edit.words : null,
+      script: edit.script,
+      speed: edit.speed,
+      length: edit.length,
+      beats: songBeats,
+      handle: edit.handle,
+    })
+    return { timeline, style, filter: edit.filter ?? style.filter, handle: edit.handle }
+  }, [clips, edit, style, beats, project.musicId])
 
   // engine lifecycle
   useEffect(() => {
@@ -106,14 +257,17 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    engineRef.current?.setProject(project)
-  }, [project])
+    engineRef.current?.setProject({ ...project, montage })
+  }, [project, montage, fontsReady])
+
+  const isMontage = project.mode === 'montage'
+  const stageAspect: Aspect = isMontage ? style.aspect : project.template.aspect
 
   // fit stage into available space
   useLayoutEffect(() => {
     const el = stageWrapRef.current!
     const ro = new ResizeObserver(() => {
-      const a = ASPECT_SIZE[project.template.aspect]
+      const a = ASPECT_SIZE[stageAspect]
       const W = el.clientWidth
       const H = el.clientHeight
       const scale = Math.min(W / a.w, H / a.h)
@@ -121,7 +275,7 @@ export default function App() {
     })
     ro.observe(el)
     return () => ro.disconnect()
-  }, [project.template.aspect])
+  }, [stageAspect])
 
   const update = useCallback((fn: (p: Project) => Project) => setProject((p) => fn(p)), [])
 
@@ -182,11 +336,51 @@ export default function App() {
         slots[k] = { ...emptySlot(), clipId: c.id, muted: anySound || c.kind !== 'video' }
         if (c.kind === 'video') anySound = true
       })
-      return { ...p, slots, musicId: audio && !p.musicId ? audio.id : p.musicId }
+      return { ...p, slots, musicId: audio ? audio.id : p.musicId }
     })
   }
 
+  const moveClip = (id: string, beforeId: string) =>
+    setClips((cs) => {
+      const from = cs.findIndex((c) => c.id === id)
+      if (from < 0 || id === beforeId) return cs
+      const next = [...cs]
+      const [c] = next.splice(from, 1)
+      next.splice(next.findIndex((x) => x.id === beforeId), 0, c)
+      return next
+    })
+
+  const addOverlay = (pr: Preset) => {
+    const total = engineRef.current?.totalDuration() ?? 5
+    const duration = pr.full ? total : Math.min(pr.duration, total)
+    const start = pr.full ? 0 : Math.max(0, Math.min(time.t, total - duration))
+    const o: Overlay = { id: uid(), kind: pr.kind, text: pr.text, start, duration, color: pr.color }
+    update((p) => ({ ...p, overlays: [...p.overlays, o] }))
+    setOpenOverlay(o.id)
+    engineRef.current?.seek(start)
+  }
+  const patchOverlay = (id: string, patch: Partial<Overlay>) =>
+    update((p) => ({ ...p, overlays: p.overlays.map((o) => (o.id === id ? { ...o, ...patch } : o)) }))
+
+  const autoCaption = async () => {
+    const v = clips.find((c) => c.id === edit.voiceId)
+    if (!v) return
+    try {
+      const words = await transcribe(v.url, setCapStatus)
+      if (!words.length) {
+        setCapStatus('No speech found in that clip.')
+        return
+      }
+      patchEdit({ words, wordsFor: v.id, script: words.map((w) => w.text).join(' ') })
+      setCapStatus(null)
+    } catch (e) {
+      console.error(e)
+      setCapStatus('Auto-captions could not load. Check your connection and try again.')
+    }
+  }
+
   const removeClipEverywhere = (id: string) => {
+    if (edit.voiceId === id) patchEdit({ voiceId: null, words: null, wordsFor: null })
     engineRef.current?.removeClip(id)
     setClips((cs) => cs.filter((c) => c.id !== id))
     update((p) => ({
@@ -231,7 +425,7 @@ export default function App() {
 
   const startExport = async () => {
     const e = engineRef.current!
-    if (!e.activeSlots().length) return
+    if (!canExport) return
     exportCancelled.current = false
     setSelected(null)
     setExporting({ progress: 0 })
@@ -253,7 +447,11 @@ export default function App() {
   const filled = project.slots.slice(0, n).filter((s) => s.clipId).length
   const sel = selected != null && selected < n ? project.slots[selected] : null
   const selClip = sel?.clipId ? clips.find((c) => c.id === sel.clipId) : null
-  const step = filled === 0 ? 2 : 3
+  const montageReady = isMontage && (visibleClips.length > 0 || !!edit.voiceId)
+  const canExport = isMontage ? montageReady : filled > 0
+  const step = (isMontage ? montageReady : filled > 0) ? 3 : 2
+  const videoClips = clips.filter((c) => c.kind === 'video')
+  const order = new Map(visibleClips.filter((c) => c.id !== edit.voiceId).map((c, i) => [c.id, i + 1]))
 
   return (
     <div
@@ -269,16 +467,35 @@ export default function App() {
           <span className="logo-mark">▶</span> FastCut
         </div>
         <ol className="steps">
-          <li className={step >= 1 ? 'done' : ''}>Pick a template</li>
-          <li className={step === 2 ? 'now' : step > 2 ? 'done' : ''}>Drag clips into the boxes</li>
+          <li className={step >= 1 ? 'done' : ''}>{isMontage ? 'Pick a style' : 'Pick a template'}</li>
+          <li className={step === 2 ? 'now' : step > 2 ? 'done' : ''}>{isMontage ? 'Add your clips' : 'Drag clips into the boxes'}</li>
           <li className={step === 3 ? 'now' : ''}>Export</li>
         </ol>
-        <button className="btn primary" disabled={!filled} onClick={startExport}>
+        <button className="btn primary" disabled={!canExport} onClick={startExport}>
           ⬇ Export video
         </button>
       </header>
 
       <aside className="panel left">
+        <div className="mode-tabs">
+          {(['layout', 'montage'] as const).map((m) => (
+            <button key={m} className={project.mode === m ? 'on' : ''} onClick={() => (update((p) => ({ ...p, mode: m })), setSelected(null))}>
+              {project.mode === m && <motion.span layoutId="mtab" className="tab-pill" transition={spring} />}
+              <span>{m === 'layout' ? '🧩 Layouts' : '⚡ Fast edits'}</span>
+            </button>
+          ))}
+        </div>
+        {isMontage ? (
+          <>
+            <h3>1. Pick a style</h3>
+            <div className="style-list">
+              {EDIT_STYLES.map((s) => (
+                <StyleCard key={s.id} s={s} active={s.id === edit.styleId} onClick={() => patchEdit({ styleId: s.id, filter: null })} />
+              ))}
+            </div>
+          </>
+        ) : (
+        <>
         <h3>1. Templates</h3>
         <div className="chips">
           {(['all', '16:9', '9:16', '1:1'] as const).map((a) => (
@@ -292,13 +509,22 @@ export default function App() {
             <TemplateThumb key={t.id} t={t} active={t.id === project.template.id} onClick={() => chooseTemplate(t)} />
           ))}
         </div>
+        </>
+        )}
       </aside>
 
       <main className="center">
         <div className="stage-wrap" ref={stageWrapRef} style={{ ['--ar' as string]: `${ASPECT_SIZE[project.template.aspect].w} / ${ASPECT_SIZE[project.template.aspect].h}` }}>
           <div className="stage" style={{ width: stageSize.w, height: stageSize.h }}>
             <canvas ref={canvasRef} />
-            {project.template.regions.map((r, i) => {
+            {isMontage && !montageReady && (
+              <button className="montage-drop" onClick={() => ((pickTarget.current = null), fileRef.current?.click())}>
+                <span className="plus">+</span>
+                <b>Drop all your clips here</b>
+                <span>Videos and photos. We'll cut them together for you.</span>
+              </button>
+            )}
+            {!isMontage && project.template.regions.map((r, i) => {
               const s = project.slots[i]
               const has = !!s?.clipId
               return (
@@ -336,7 +562,10 @@ export default function App() {
                       place(i, armed)
                       setArmed(null)
                       setSelected(i)
-                    } else if (has) setSelected(selected === i ? null : i)
+                    } else if (has) {
+                      setSelected(selected === i ? null : i)
+                      setRightTab('edit')
+                    }
                     else {
                       pickTarget.current = i
                       fileRef.current?.click()
@@ -375,7 +604,9 @@ export default function App() {
         <section className="bin">
           <div className="bin-head">
             <h3>Your clips</h3>
-            <span className="muted">Drag a clip onto a box — or tap a clip, then tap a box.</span>
+            <span className="muted">
+              {isMontage ? 'They play in this order. Drag to reorder.' : 'Drag a clip onto a box — or tap a clip, then tap a box.'}
+            </span>
             <button className="btn" onClick={() => ((pickTarget.current = null), fileRef.current?.click())}>
               + Add clips
             </button>
@@ -389,15 +620,29 @@ export default function App() {
             {visibleClips.map((c) => (
               <div
                 key={c.id}
-                className={'clip' + (usedIds.has(c.id) ? ' used' : '') + (armed === c.id ? ' armed' : '')}
+                className={
+                  'clip' + (!isMontage && usedIds.has(c.id) ? ' used' : '') + (armed === c.id ? ' armed' : '') + (isMontage ? ' ordered' : '')
+                }
                 draggable
                 onDragStart={(e) => e.dataTransfer.setData('text/fastcut-clip', c.id)}
-                onClick={() => setArmed(armed === c.id ? null : c.id)}
+                onDragOver={(e) => isMontage && e.preventDefault()}
+                onDrop={(e) => {
+                  if (!isMontage) return
+                  const id = e.dataTransfer.getData('text/fastcut-clip')
+                  if (!id) return
+                  e.preventDefault()
+                  e.stopPropagation()
+                  moveClip(id, c.id)
+                }}
+                onClick={() => !isMontage && setArmed(armed === c.id ? null : c.id)}
                 title={c.name}
               >
                 {c.kind === 'video' ? <video src={c.url + '#t=0.1'} muted preload="metadata" /> : <img src={c.url} alt="" />}
                 <span className="clip-name">{c.name}</span>
                 {c.kind === 'video' && <span className="clip-dur">{fmt(c.duration)}</span>}
+                {isMontage && (
+                  <span className={'clip-num' + (c.id === edit.voiceId ? ' voice' : '')}>{c.id === edit.voiceId ? '🎤' : order.get(c.id)}</span>
+                )}
                 <button
                   className="x"
                   onClick={(e) => {
@@ -415,7 +660,214 @@ export default function App() {
       </main>
 
       <aside className="panel right">
-        {sel && selClip ? (
+        <div className="mode-tabs small">
+          {(['edit', 'motion'] as const).map((k) => (
+            <button key={k} className={rightTab === k ? 'on' : ''} onClick={() => setRightTab(k)}>
+              {rightTab === k && <motion.span layoutId="rtab" className="tab-pill" transition={spring} />}
+              <span>{k === 'edit' ? '⚙️ Settings' : '✨ Motion'}</span>
+            </button>
+          ))}
+        </div>
+        <AnimatePresence mode="wait" initial={false}>
+        <motion.div key={rightTab} initial={{ opacity: 0, x: 12 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -12 }} transition={{ duration: 0.15 }}>
+        {rightTab === 'motion' ? (
+          <>
+            <h3>Add motion graphics</h3>
+            <p className="hint-text top">Tap one to drop it in at the playhead. They're saved into your video.</p>
+            <div className="fx-grid">
+              {PRESETS.map((pr) => (
+                <motion.button key={pr.kind} className="fx" onClick={() => addOverlay(pr)} whileHover={{ y: -3 }} whileTap={{ scale: 0.94 }} transition={spring}>
+                  <OverlayPreview preset={pr} />
+                  <span>{pr.name}</span>
+                </motion.button>
+              ))}
+            </div>
+            {project.overlays.length > 0 && <h3>In your video</h3>}
+            <div className="fx-list">
+              <AnimatePresence initial={false}>
+                {project.overlays.map((o) => {
+                  const pr = PRESETS.find((x) => x.kind === o.kind)!
+                  const open = openOverlay === o.id
+                  const total = time.total
+                  return (
+                    <motion.div
+                      key={o.id}
+                      layout
+                      className={'fx-item' + (open ? ' open' : '')}
+                      initial={{ opacity: 0, scale: 0.9, height: 0 }}
+                      animate={{ opacity: 1, scale: 1, height: 'auto' }}
+                      exit={{ opacity: 0, scale: 0.9, height: 0 }}
+                      transition={spring}
+                    >
+                      <button className="fx-head" onClick={() => (setOpenOverlay(open ? null : o.id), engineRef.current?.seek(o.start))}>
+                        <span className="dot" style={{ background: o.color }} />
+                        <b>{pr.name}</b>
+                        <span className="muted">
+                          {fmt(o.start)}–{fmt(o.start + o.duration)}
+                        </span>
+                      </button>
+                      {open && (
+                        <div className="fx-body">
+                          {pr.hasText && (
+                            <input className="text" value={o.text} maxLength={40} onChange={(e) => patchOverlay(o.id, { text: e.target.value })} />
+                          )}
+                          <div className="swatches small">
+                            {OVERLAY_COLORS.map((c) => (
+                              <button
+                                key={c}
+                                className={'swatch' + (o.color === c ? ' on' : '')}
+                                style={{ background: c }}
+                                onClick={() => patchOverlay(o.id, { color: c })}
+                                aria-label={c}
+                              />
+                            ))}
+                          </div>
+                          <label>
+                            Starts at <b>{fmt(o.start)}</b>
+                          </label>
+                          <input
+                            type="range"
+                            min={0}
+                            max={Math.max(0, total - 0.5)}
+                            step={0.05}
+                            value={o.start}
+                            onChange={(e) => {
+                              patchOverlay(o.id, { start: Number(e.target.value) })
+                              engineRef.current?.seek(Number(e.target.value))
+                            }}
+                          />
+                          <label>
+                            Lasts <b>{o.duration.toFixed(1)}s</b>
+                          </label>
+                          <input
+                            type="range"
+                            min={0.5}
+                            max={Math.max(1, total)}
+                            step={0.1}
+                            value={o.duration}
+                            onChange={(e) => patchOverlay(o.id, { duration: Number(e.target.value) })}
+                          />
+                          <button className="btn danger full" onClick={() => update((p) => ({ ...p, overlays: p.overlays.filter((x) => x.id !== o.id) }))}>
+                            Remove
+                          </button>
+                        </div>
+                      )}
+                    </motion.div>
+                  )
+                })}
+              </AnimatePresence>
+            </div>
+          </>
+        ) : isMontage ? (
+          <>
+            <h3>Talking clip</h3>
+            <div className="field">
+              <select
+                className="text"
+                value={edit.voiceId ?? ''}
+                onChange={(e) => patchEdit({ voiceId: e.target.value || null })}
+              >
+                <option value="">None — just music & clips</option>
+                {videoClips.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    🎤 {c.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {edit.voiceId && (
+              <>
+                <div className="field">
+                  <div className="seg">
+                    <button className={edit.voiceMode === 'intro' ? 'on' : ''} onClick={() => patchEdit({ voiceMode: 'intro' })}>
+                      Show me first
+                    </button>
+                    <button className={edit.voiceMode === 'over' ? 'on' : ''} onClick={() => patchEdit({ voiceMode: 'over' })}>
+                      Voice over clips
+                    </button>
+                  </div>
+                </div>
+                <button className="btn full magic" disabled={!!capStatus && !capStatus.startsWith('No') && !capStatus.startsWith('Auto')} onClick={autoCaption}>
+                  ✨ Auto-caption what I say
+                </button>
+                {capStatus && <p className="status">{capStatus}</p>}
+              </>
+            )}
+
+            <h3>Words on screen</h3>
+            <div className="field">
+              <textarea
+                className="text"
+                rows={4}
+                placeholder={style.text === 'kinetic' ? 'Type your words. One phrase per line.' : 'Type your words. They pop up one at a time.'}
+                value={edit.script}
+                onChange={(e) => patchEdit({ script: e.target.value })}
+              />
+              {edit.words && edit.wordsFor === edit.voiceId && <p className="hint-text">Timed to your voice. You can fix typos.</p>}
+            </div>
+
+            <h3>Music</h3>
+            {project.musicId ? (
+              <div className="field">
+                <div className="music">
+                  <span>🎵 {audioClips.find((c) => c.id === project.musicId)?.name}</span>
+                  <button className="x inline" onClick={() => update((p) => ({ ...p, musicId: null }))} aria-label="Remove music">
+                    ×
+                  </button>
+                </div>
+                <button className="btn full small-gap" onClick={() => musicRef.current?.click()}>
+                  Change song
+                </button>
+                <label className="check">
+                  <input type="checkbox" checked={edit.onBeat} onChange={(e) => patchEdit({ onBeat: e.target.checked })} />
+                  {beats?.id === project.musicId ? `Cut on the beat (${beats.bpm} BPM)` : 'Finding the beat…'}
+                </label>
+                <label>Music volume</label>
+                <input type="range" min={0} max={1} step={0.05} value={project.musicVolume} onChange={(e) => update((p) => ({ ...p, musicVolume: Number(e.target.value) }))} />
+              </div>
+            ) : (
+              <button className="btn full" onClick={() => musicRef.current?.click()}>
+                + Add a song (MP3)
+              </button>
+            )}
+
+            <h3>Pace</h3>
+            <div className="field">
+              <div className="seg">
+                {PACES.map((x) => (
+                  <button key={x.label} className={edit.speed === x.v ? 'on' : ''} onClick={() => patchEdit({ speed: x.v })}>
+                    {x.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {!(edit.voiceId && edit.voiceMode === 'over') && (
+              <div className="field">
+                <label>
+                  Montage length: <b>{edit.length}s</b>
+                </label>
+                <input type="range" min={4} max={60} step={1} value={edit.length} onChange={(e) => patchEdit({ length: Number(e.target.value) })} />
+              </div>
+            )}
+
+            <h3>Color</h3>
+            <div className="field">
+              <div className="seg wrap">
+                {FILTER_LABELS.map(([k, l]) => (
+                  <button key={k} className={(edit.filter ?? style.filter) === k ? 'on' : ''} onClick={() => patchEdit({ filter: k })}>
+                    {l}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <h3>End card</h3>
+            <div className="field">
+              <input className="text" placeholder="@yourname (optional)" value={edit.handle} maxLength={30} onChange={(e) => patchEdit({ handle: e.target.value })} />
+            </div>
+            <p className="tip">Tip: add a song and the cuts land on its beat automatically. Pick a talking clip to get auto-captions.</p>
+          </>
+        ) : sel && selClip ? (
           <>
             <h3>Selected box</h3>
             <div className="field">
@@ -562,12 +1014,14 @@ export default function App() {
             <p className="tip">Tip: click a filled box to change its sound, crop or start time. Drag one box onto another to swap them.</p>
           </>
         )}
+        </motion.div>
+        </AnimatePresence>
       </aside>
 
       <input
         ref={fileRef}
         type="file"
-        accept="video/*,image/*"
+        accept="video/*,image/*,audio/*,.mp3,.m4a,.wav"
         multiple
         hidden
         onChange={(e) => {
@@ -578,7 +1032,7 @@ export default function App() {
       <input
         ref={musicRef}
         type="file"
-        accept="audio/*"
+        accept="audio/*,.mp3,.m4a,.wav"
         hidden
         onChange={async (e) => {
           const f = e.target.files?.[0]
@@ -592,9 +1046,10 @@ export default function App() {
         }}
       />
 
+      <AnimatePresence>
       {exporting && (
-        <div className="modal-bg">
-          <div className="modal">
+        <motion.div className="modal-bg" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+          <motion.div className="modal" initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.95, opacity: 0 }} transition={spring}>
             {!exporting.url ? (
               <>
                 <h2>Making your video…</h2>
@@ -628,9 +1083,10 @@ export default function App() {
                 </div>
               </>
             )}
-          </div>
-        </div>
+          </motion.div>
+        </motion.div>
       )}
+      </AnimatePresence>
     </div>
   )
 }

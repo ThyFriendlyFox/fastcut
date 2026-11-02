@@ -1,4 +1,9 @@
-import { ASPECT_SIZE, Rect, Template } from './templates'
+import { ASPECT_SIZE, Aspect, Rect, Template } from './templates'
+import { EditStyle, FilterKind, Timeline } from './montage'
+import { MontagePainter } from './montageDraw'
+import { Overlay, drawOverlay } from './overlays'
+
+export type Montage = { timeline: Timeline; style: EditStyle; filter: FilterKind; handle: string }
 
 export type Clip = {
   id: string
@@ -22,6 +27,9 @@ export type CaptionStyle = 'classic' | 'meme' | 'box'
 export type CaptionPos = 'top' | 'middle' | 'bottom'
 
 export type Project = {
+  mode: 'layout' | 'montage'
+  overlays: Overlay[]
+  montage: Montage | null
   template: Template
   slots: Slot[]
   background: string
@@ -59,9 +67,12 @@ export class Engine {
   private onEnd: (() => void) | null = null
   onTick: ((t: number, total: number, playing: boolean) => void) | null = null
 
+  private painter: MontagePainter
+
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas
     this.ctx = canvas.getContext('2d')!
+    this.painter = new MontagePainter(this.ctx, (id) => (this.clips.get(id)?.el as HTMLVideoElement | HTMLImageElement) ?? null)
     const loop = () => {
       this.tick()
       this.raf = requestAnimationFrame(loop)
@@ -74,11 +85,19 @@ export class Engine {
     this.pause()
   }
 
+  aspect(p = this.project): Aspect {
+    return p.mode === 'montage' && p.montage ? p.montage.style.aspect : p.template.aspect
+  }
+
+  get montage() {
+    return this.project.mode === 'montage' ? this.project.montage : null
+  }
+
   setProject(p: Project) {
-    const prevAspect = this.project?.template.aspect
+    const prevAspect = this.project ? this.aspect() : null
     this.project = p
-    if (prevAspect !== p.template.aspect) {
-      const s = ASPECT_SIZE[p.template.aspect]
+    if (prevAspect !== this.aspect(p)) {
+      const s = ASPECT_SIZE[this.aspect(p)]
       this.canvas.width = s.w
       this.canvas.height = s.h
     }
@@ -98,7 +117,7 @@ export class Engine {
       }
     }
     // stop clips that are no longer placed
-    const used = new Set(this.activeSlots().map((s) => s.clipId))
+    const used = new Set(this.montage ? [...this.montage.timeline.uses.keys()] : this.activeSlots().map((s) => s.clipId))
     for (const c of this.clips.values()) {
       if (c.kind === 'video' && !used.has(c.id) && c.id !== p.musicId) (c.el as HTMLVideoElement).pause()
     }
@@ -126,6 +145,7 @@ export class Engine {
   }
 
   totalDuration() {
+    if (this.montage) return this.montage.timeline.total
     let max = 0
     for (const s of this.activeSlots()) {
       const c = this.clips.get(s.clipId!)!
@@ -165,7 +185,9 @@ export class Engine {
   updateGains() {
     if (!this.audio) return
     const audible = new Set<string>()
-    for (const s of this.activeSlots()) if (!s.muted) audible.add(s.clipId!)
+    if (this.montage) {
+      if (this.montage.timeline.voiceId) audible.add(this.montage.timeline.voiceId)
+    } else for (const s of this.activeSlots()) if (!s.muted) audible.add(s.clipId!)
     for (const c of this.clips.values()) {
       if (!(c.el instanceof HTMLMediaElement)) continue
       const g = this.gains.get(c.el)
@@ -183,7 +205,41 @@ export class Engine {
     return this.project.loopShort ? s.offset + (t % len) : c.duration - 0.05
   }
 
+  /** Montage: each video plays during its uses and pre-seeks to its next one while idle. */
+  private syncMontage(play: boolean, force: boolean) {
+    const tl = this.montage!.timeline
+    const t = this.t
+    for (const c of this.clips.values()) {
+      if (c.kind !== 'video' || c.id === this.project.musicId) continue
+      const v = c.el as HTMLVideoElement
+      const uses = tl.uses.get(c.id)
+      if (!uses) {
+        if (!v.paused) v.pause()
+        continue
+      }
+      const active = uses.find((u) => t >= u.start - 0.02 && t < u.end)
+      if (active) {
+        let want = active.src + (t - active.start)
+        if (want >= c.duration - 0.05) want = c.duration - 0.05
+        if (!v.seeking && (force || Math.abs(v.currentTime - want) > 0.25)) v.currentTime = Math.max(0, want)
+        if (play && v.paused && want < c.duration - 0.06) v.play().catch(() => {})
+        if (!play && !v.paused) v.pause()
+      } else {
+        if (!v.paused) v.pause()
+        const next = uses.find((u) => u.start > t) ?? uses[0]
+        if (!v.seeking && Math.abs(v.currentTime - next.src) > 0.05) v.currentTime = next.src
+      }
+    }
+    if (this.music) {
+      const m = this.music.el
+      if (force) m.currentTime = this.t % (m.duration || 1)
+      if (play && m.paused) m.play().catch(() => {})
+      if (!play && !m.paused) m.pause()
+    }
+  }
+
   private syncAll(play: boolean, force = false) {
+    if (this.montage) return this.syncMontage(play, force)
     for (const s of this.activeSlots()) {
       const c = this.clips.get(s.clipId!)!
       if (c.kind !== 'video') continue
@@ -240,6 +296,8 @@ export class Engine {
         this.t = 0
         this.startPerf = performance.now()
         this.syncAll(true, true)
+      } else if (this.montage) {
+        this.syncMontage(true, false)
       } else if (performance.now() - this.lastSync > 250) {
         this.lastSync = performance.now()
         this.syncAll(true)
@@ -254,6 +312,14 @@ export class Engine {
     const { ctx, canvas, project: p } = this
     const W = canvas.width
     const H = canvas.height
+    const m = this.montage
+    if (m) {
+      this.painter.draw(this.t, W, H, m.timeline, m.style, m.filter)
+      const ec = m.timeline.endCardStart
+      if (ec != null && this.t >= ec) this.painter.drawEndCard(this.t, ec, m.handle, W, H)
+      this.drawOverlays()
+      return
+    }
     ctx.fillStyle = p.background
     ctx.fillRect(0, 0, W, H)
     const n = p.template.regions.length
@@ -265,6 +331,11 @@ export class Engine {
       this.drawInRegion(c, s, p.template.regions[i])
     }
     this.drawCaption()
+    this.drawOverlays()
+  }
+
+  private drawOverlays() {
+    for (const o of this.project.overlays ?? []) drawOverlay(this.ctx, this.canvas.width, this.canvas.height, o, this.t)
   }
 
   private drawInRegion(c: Clip, s: Slot, r: Rect) {
