@@ -206,7 +206,7 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, W: number, H: number,
         ctx.save()
         ctx.translate(x, y)
         ctx.rotate(tt * (4 + rnd(seed + i + 2) * 8))
-        ctx.scale(1, Math.cos(tt * (6 + i % 5)))
+        ctx.scale(1, Math.cos(tt * (6 + (i % 5))))
         ctx.globalAlpha = 1 - outP
         ctx.fillStyle = colors[i % colors.length]
         ctx.fillRect(-S * 0.008, -S * 0.004, S * 0.016, S * 0.008)

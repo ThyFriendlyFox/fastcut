@@ -295,7 +295,9 @@ export function plan(inp: PlanInput): Timeline {
   let voiceEnd = 0
   if (voice) {
     voiceEnd = inp.voiceMode === 'intro' ? montageStart : contentEnd
-    uses.set(voice.id, [{ start: 0, end: voiceEnd + (inp.voiceMode === 'intro' && shots[1] ? TRANSITION_TIME[shots[1].transition] : 0), src: 0 }])
+    uses.set(voice.id, [
+      { start: 0, end: voiceEnd + (inp.voiceMode === 'intro' && shots[1] ? TRANSITION_TIME[shots[1].transition] : 0), src: 0 },
+    ])
     // voice clip shown inside the montage too (over mode): always in sync with the audio
     for (const s of shots) for (const l of s.layers) if (l.clipId === voice.id) l.src = s.start
   }

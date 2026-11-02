@@ -1,12 +1,16 @@
 {
   "name": "fastcut",
   "private": true,
-  "version": "1.0.0",
+  "version": "0.4.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "lint": "prettier --check . && tsc -b",
+    "format": "prettier --write .",
+    "test": "vitest run",
+    "verify": "npm run lint && npm run build && npm test"
   },
   "dependencies": {
     "motion": "12.23.24",
@@ -17,7 +21,12 @@
     "@types/react": "18.3.12",
     "@types/react-dom": "18.3.1",
     "@vitejs/plugin-react": "4.3.4",
+    "prettier": "3.3.3",
     "typescript": "5.6.3",
-    "vite": "5.4.11"
+    "vite": "5.4.11",
+    "vitest": "2.1.8"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

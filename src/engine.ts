@@ -447,10 +447,7 @@ export class Engine {
     ]
     const mime = types.find((t) => MediaRecorder.isTypeSupported(t)) || ''
     const ext = mime.startsWith('video/mp4') ? 'mp4' : 'webm'
-    const stream = new MediaStream([
-      ...this.canvas.captureStream(30).getVideoTracks(),
-      ...this.streamDest!.stream.getAudioTracks(),
-    ])
+    const stream = new MediaStream([...this.canvas.captureStream(30).getVideoTracks(), ...this.streamDest!.stream.getAudioTracks()])
     const rec = new MediaRecorder(stream, {
       mimeType: mime || undefined,
       // ~8 Mbps at 1080p, scaled by pixel count
