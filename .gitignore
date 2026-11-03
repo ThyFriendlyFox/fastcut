@@ -1,0 +1,6 @@
+node_modules
+dist
+.vercel
+*.local
+.claude/ralph-loop.local.md
+.claude/*.local.md
